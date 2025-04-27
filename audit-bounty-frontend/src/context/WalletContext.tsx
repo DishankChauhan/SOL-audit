@@ -58,6 +58,14 @@ function WalletStateProvider({ children }: { children: ReactNode }) {
     return () => unsubscribe();
   }, []);
 
+  // Store wallet in global context for use outside of React components
+  useEffect(() => {
+    // Dynamically import to avoid SSR issues
+    import('@/lib/solana/wallet-helper').then(({ setWalletContextState }) => {
+      setWalletContextState(wallet);
+    });
+  }, [wallet]);
+
   useEffect(() => {
     const saveWalletAddress = async () => {
       if (wallet.connected && wallet.publicKey && currentUser) {

@@ -8,7 +8,8 @@ import {
   sendAndConfirmTransaction,
   Keypair,
   LAMPORTS_PER_SOL,
-  TransactionSignature
+  TransactionSignature,
+  ComputeBudgetProgram
 } from '@solana/web3.js';
 import * as borsh from '@project-serum/borsh';
 import BN from 'bn.js';
@@ -588,6 +589,319 @@ export class SolanaService {
     } catch (error) {
       console.error('Error getting balance:', error);
       return 0;
+    }
+  }
+
+  /**
+   * Static method to release payment from escrow to an auditor
+   * This is called when a bounty owner approves a submission and pays the auditor
+   */
+  static async releasePaymentFromEscrow(
+    wallet: WalletContextState,
+    bountyId: string,
+    recipientAddress: string,
+    amount: number
+  ): Promise<{ 
+    status: 'success' | 'error'; 
+    signature?: string;
+    message?: string;
+  }> {
+    try {
+      if (!wallet.publicKey || !wallet.signTransaction) {
+        return { 
+          status: 'error', 
+          message: 'Wallet not connected or does not support signing' 
+        };
+      }
+
+      const connection = getSolanaConnection();
+      
+      // Convert bountyId and recipient to PublicKey
+      const bountyPda = new PublicKey(bountyId);
+      const recipientPubkey = new PublicKey(recipientAddress);
+      
+      // Derive the vault PDA from the bounty PDA
+      const [vaultPda, _] = await deriveVaultPDA(bountyPda);
+      
+      console.log(`Releasing payment from escrow: ${amount} SOL`);
+      console.log(`Bounty PDA: ${bountyPda.toString()}`);
+      console.log(`Vault PDA: ${vaultPda.toString()}`);
+      console.log(`Recipient: ${recipientPubkey.toString()}`);
+      
+      // Verify the bounty account exists before proceeding
+      const bountyAccount = await connection.getAccountInfo(bountyPda);
+      if (!bountyAccount) {
+        console.error('Bounty account not found on-chain');
+        return {
+          status: 'error',
+          message: `Bounty account ${bountyId} not found on the blockchain`
+        };
+      }
+      
+      // Verify the vault account exists before proceeding
+      const vaultAccount = await connection.getAccountInfo(vaultPda);
+      if (!vaultAccount) {
+        console.error('Vault account not found on-chain');
+        return {
+          status: 'error',
+          message: `Vault account for bounty ${bountyId} not found on the blockchain`
+        };
+      }
+      
+      // Check bounty data to ensure it's in the correct state (Open)
+      try {
+        const bountyData = bountySchema.decode(bountyAccount.data);
+        if (bountyData.status !== BountyStatus.Open) {
+          return {
+            status: 'error',
+            message: `Bounty is not in the Open state. Current state: ${BountyStatus[bountyData.status]}. Cannot approve.`
+          };
+        }
+        
+        // Verify creator matches the wallet
+        if (!bountyData.creator.equals(wallet.publicKey)) {
+          return {
+            status: 'error',
+            message: 'Only the bounty creator can approve submissions'
+          };
+        }
+      } catch (decodeError) {
+        console.error('Error decoding bounty data:', decodeError);
+        return {
+          status: 'error',
+          message: 'Failed to read bounty data from blockchain. The account may not be a valid bounty account.'
+        };
+      }
+      
+      // Create a transaction for approving the submission
+      // This uses the approveSubmission transaction which sets the hunter
+      // and marks the bounty as approved
+      const transaction = await approveSubmission(
+        connection,
+        wallet.publicKey,
+        bountyPda,
+        recipientPubkey
+      );
+      
+      // Add priority fee to increase chances of success
+      transaction.add(
+        ComputeBudgetProgram.setComputeUnitPrice({
+          microLamports: 100_000
+        })
+      );
+      
+      // Set recent blockhash and fee payer
+      const { blockhash } = await connection.getLatestBlockhash('confirmed');
+      transaction.recentBlockhash = blockhash;
+      transaction.feePayer = wallet.publicKey;
+      
+      // Sign and send transaction
+      try {
+        const signedTx = await wallet.signTransaction(transaction);
+        const signature = await connection.sendRawTransaction(signedTx.serialize(), {
+          skipPreflight: false,
+          preflightCommitment: 'confirmed'
+        });
+        
+        // Confirm transaction with a more reliable method
+        console.log(`Transaction sent with signature: ${signature}`);
+        console.log("Confirming transaction...");
+        
+        // Try to use HTTP polling for confirmation instead of WebSockets
+        try {
+          // Poll for confirmation status
+          console.log("Using HTTP polling for confirmation...");
+          let confirmed = false;
+          let attempts = 0;
+          
+          while (!confirmed && attempts < 30) {
+            const signatureStatus = await connection.getSignatureStatus(signature);
+            
+            if (signatureStatus && signatureStatus.value) {
+              // Check for errors
+              if (signatureStatus.value.err) {
+                const errorDetails = JSON.stringify(signatureStatus.value.err);
+                console.error("Transaction failed:", errorDetails);
+                return {
+                  status: 'error',
+                  signature,
+                  message: `Transaction failed: ${errorDetails}`
+                };
+              }
+              
+              // Check confirmation status
+              if (signatureStatus.value.confirmationStatus === 'confirmed' ||
+                  signatureStatus.value.confirmationStatus === 'finalized') {
+                confirmed = true;
+                console.log(`Transaction confirmed with status: ${signatureStatus.value.confirmationStatus}`);
+                break;
+              }
+            }
+            
+            // Wait before polling again
+            await new Promise(resolve => setTimeout(resolve, 1000));
+            attempts++;
+          }
+          
+          if (confirmed) {
+            return {
+              status: 'success',
+              signature,
+              message: `Successfully released ${amount} SOL to ${recipientAddress}`
+            };
+          } else {
+            console.warn("Transaction not confirmed after polling");
+            return {
+              status: 'error',
+              signature,
+              message: `Transaction may have failed, could not confirm after ${attempts} attempts`
+            };
+          }
+        } catch (pollError) {
+          console.error("Error polling for transaction status:", pollError);
+          return {
+            status: 'error',
+            signature,
+            message: `Error confirming transaction: ${pollError instanceof Error ? pollError.message : 'Unknown error'}`
+          };
+        }
+      } catch (txError) {
+        console.error("Error sending transaction:", txError);
+        
+        // Handle SendTransactionError specifically to extract logs
+        if (txError instanceof Error && txError.name === 'SendTransactionError') {
+          // Try to extract logs from the error
+          const errorMessage = txError.message;
+          let logs = '';
+          
+          try {
+            // Use regex to extract the logs section from the error message
+            const logsMatch = errorMessage.match(/Logs:\s*(\[[\s\S]*?\])/);
+            if (logsMatch && logsMatch[1]) {
+              logs = logsMatch[1];
+            }
+          } catch (regexError) {
+            console.error("Error extracting logs:", regexError);
+          }
+          
+          return {
+            status: 'error',
+            message: `Transaction simulation failed: ${errorMessage}\n\nLogs: ${logs}`
+          };
+        }
+        
+        return {
+          status: 'error',
+          message: `Error sending transaction: ${txError instanceof Error ? txError.message : 'Unknown error'}`
+        };
+      }
+    } catch (error) {
+      console.error("Error releasing payment from escrow:", error);
+      return {
+        status: 'error',
+        message: `Error releasing payment: ${error instanceof Error ? error.message : 'Unknown error'}`
+      };
+    }
+  }
+
+  /**
+   * Initialize and fund an escrow account for testing
+   * This is used in the EscrowFunder component for development testing
+   */
+  static async initializeAndFundEscrow(
+    wallet: WalletContextState,
+    amount: number // SOL amount
+  ): Promise<{
+    status: 'success' | 'error';
+    signature?: string;
+    escrowAddress?: string;
+    message?: string;
+  }> {
+    try {
+      if (!wallet.publicKey || !wallet.signTransaction) {
+        return {
+          status: 'error',
+          message: 'Wallet not connected or does not support signing'
+        };
+      }
+
+      const connection = getSolanaConnection();
+      
+      // Create a custom seed for the test escrow
+      const timestamp = Date.now().toString();
+      const customSeedStr = `test_escrow_${timestamp}`;
+      const customSeed = new Uint8Array(Buffer.from(customSeedStr));
+      
+      // Set deadline to 30 days from now
+      const deadline = Math.floor(Date.now() / 1000) + (30 * 24 * 60 * 60);
+      
+      console.log("Creating test escrow with seed:", customSeedStr);
+      
+      // Create a transaction to initialize a bounty with the specified amount
+      const { transaction, bountyPda, vaultPda } = await createBounty(
+        connection,
+        wallet.publicKey,
+        amount,
+        deadline,
+        customSeed
+      );
+      
+      // Set recent blockhash and fee payer
+      const { blockhash } = await connection.getLatestBlockhash();
+      transaction.recentBlockhash = blockhash;
+      transaction.feePayer = wallet.publicKey;
+      
+      // Sign and send transaction
+      const signedTx = await wallet.signTransaction(transaction);
+      const signature = await connection.sendRawTransaction(signedTx.serialize());
+      
+      // Confirm transaction
+      console.log("Transaction sent with signature:", signature);
+      console.log("Confirming transaction...");
+      
+      try {
+        const confirmation = await connection.confirmTransaction(
+          {
+            signature,
+            lastValidBlockHeight: (await connection.getLatestBlockhash()).lastValidBlockHeight,
+            blockhash: transaction.recentBlockhash!
+          },
+          'confirmed'
+        );
+        
+        if (confirmation.value.err) {
+          console.error("Transaction confirmed with error:", confirmation.value.err);
+          return {
+            status: 'error',
+            signature,
+            message: `Transaction confirmed but failed: ${JSON.stringify(confirmation.value.err)}`
+          };
+        }
+        
+        console.log("Escrow initialized and funded successfully!");
+        console.log("Bounty PDA:", bountyPda.toString());
+        console.log("Vault PDA:", vaultPda.toString());
+        
+        return {
+          status: 'success',
+          signature,
+          escrowAddress: bountyPda.toString(),
+          message: `Escrow successfully funded with ${amount} SOL`
+        };
+      } catch (confirmError) {
+        console.error("Error confirming transaction:", confirmError);
+        return {
+          status: 'error',
+          signature,
+          message: `Error confirming transaction: ${confirmError instanceof Error ? confirmError.message : 'Unknown error'}`
+        };
+      }
+    } catch (error) {
+      console.error("Error initializing and funding escrow:", error);
+      return {
+        status: 'error',
+        message: `Error initializing escrow: ${error instanceof Error ? error.message : 'Unknown error'}`
+      };
     }
   }
 }

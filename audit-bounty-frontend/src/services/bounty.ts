@@ -3,6 +3,18 @@ import { BountyStatus, SolanaService } from './solana';
 import { addDoc, collection, deleteDoc, doc, getDoc, getDocs, query, setDoc, updateDoc, where } from 'firebase/firestore';
 import { db } from '@/lib/firebase/config';
 import { lamportsToSol } from '@/lib/solana/config';
+import { WalletContextState } from '@solana/wallet-adapter-react';
+
+// Add TypeScript declaration for window.solana
+declare global {
+  interface Window {
+    solana?: {
+      signMessage?: (message: Uint8Array, encoding: string) => Promise<Uint8Array>;
+      isPhantom?: boolean;
+      connect?: () => Promise<{ publicKey: string }>;
+    };
+  }
+}
 
 // Interface for bounty data stored in Firebase
 export interface IBounty {
@@ -160,28 +172,74 @@ export class Bounty {
       
       // Get the submission document reference
       const submissionRef = doc(db, 'submissions', submissionId);
+      const submissionDoc = await getDoc(submissionRef);
       
-      // Update the submission status to approved
-      await updateDoc(submissionRef, {
-        status: 'approved',
-        reviewedAt: new Date(),
-        reviewerComments: 'Approved by bounty owner'
-      });
+      if (!submissionDoc.exists()) {
+        throw new Error(`Submission ${submissionId} not found`);
+      }
       
-      // Update the bounty document to increment approvedCount
+      const submissionData = submissionDoc.data();
+      
+      // Get the bounty document 
       const bountyRef = doc(db, 'bounties', bountyId);
       const bountySnapshot = await getDoc(bountyRef);
       
-      if (bountySnapshot.exists()) {
-        const bountyData = bountySnapshot.data();
-        await updateDoc(bountyRef, {
-          approvedCount: (bountyData.approvedCount || 0) + 1,
-          updatedAt: new Date().getTime()
-        });
+      if (!bountySnapshot.exists()) {
+        throw new Error(`Bounty ${bountyId} not found`);
       }
       
-      console.log(`Successfully approved submission ${submissionId}`);
-      return true;
+      const bountyData = bountySnapshot.data();
+      const hunterAddress = submissionData.createdBy;
+      
+      // Use Solana Wallet Adapter instead of direct window.solana access
+      // This requires the component calling this method to be within a wallet context
+      // Import useWallet from @solana/wallet-adapter-react and call it at the component level
+      
+      // Get the wallet from the context at the component level and pass it as a parameter
+      // For this static method, we'll access the global wallet context through a helper
+      
+      try {
+        // Import dynamically to avoid server-side rendering issues
+        const { getWalletContextState } = await import('@/lib/solana/wallet-helper');
+        const wallet = getWalletContextState();
+        
+        if (!wallet.connected || !wallet.publicKey) {
+          throw new Error('Wallet not connected. Please connect your wallet first.');
+        }
+        
+        // Create a SolanaService instance with the wallet
+        const solanaService = new SolanaService(wallet);
+        
+        // Call approveSubmission on the blockchain
+        const signature = await solanaService.approveSubmission(bountyId, hunterAddress);
+        
+        // Update submission status to approved
+        await updateDoc(submissionRef, {
+          status: 'approved',
+          reviewedAt: new Date().getTime(),
+          updatedAt: new Date().getTime(),
+          transactionHash: signature
+        });
+        
+        // Update bounty status and approved hunter info in Firebase
+        await updateDoc(bountyRef, {
+          approvedCount: (bountyData.approvedCount || 0) + 1,
+          status: BountyStatusFirebase.APPROVED,
+          approvedHunter: hunterAddress,
+          updatedAt: new Date().getTime(),
+          transactionHash: signature
+        });
+        
+        console.log(`Successfully approved submission ${submissionId} for bounty ${bountyId}`);
+        return signature;
+      } catch (walletError) {
+        console.error('Error with wallet interaction:', walletError);
+        throw new Error(
+          walletError instanceof Error
+            ? `Wallet Error: ${walletError.message}`
+            : 'Unknown wallet error occurred'
+        );
+      }
     } catch (error) {
       console.error('Error approving submission:', error);
       throw error;
