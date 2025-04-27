@@ -189,55 +189,46 @@ export class Bounty {
       }
       
       const bountyData = bountySnapshot.data();
-      const hunterAddress = submissionData.createdBy;
       
-      // Use Solana Wallet Adapter instead of direct window.solana access
-      // This requires the component calling this method to be within a wallet context
-      // Import useWallet from @solana/wallet-adapter-react and call it at the component level
+      // Get hunter wallet address from different possible locations
+      const hunterAddress = submissionData.auditorWalletAddress || 
+                         submissionData.createdBy || 
+                         (submissionData.auditor && typeof submissionData.auditor === 'object' ? 
+                           submissionData.auditor.walletAddress : undefined);
       
-      // Get the wallet from the context at the component level and pass it as a parameter
-      // For this static method, we'll access the global wallet context through a helper
+      // Validate hunter address
+      if (!hunterAddress) {
+        throw new Error('Hunter wallet address not found. Make sure the auditor has connected their wallet.');
+      }
       
       try {
-        // Import dynamically to avoid server-side rendering issues
-        const { getWalletContextState } = await import('@/lib/solana/wallet-helper');
-        const wallet = getWalletContextState();
-        
-        if (!wallet.connected || !wallet.publicKey) {
-          throw new Error('Wallet not connected. Please connect your wallet first.');
-        }
-        
-        // Create a SolanaService instance with the wallet
-        const solanaService = new SolanaService(wallet);
-        
-        // Call approveSubmission on the blockchain
-        const signature = await solanaService.approveSubmission(bountyId, hunterAddress);
+        // Only update the submission status in Firebase
+        // We'll do the blockchain transaction separately when the user clicks "Pay Auditor"
         
         // Update submission status to approved
         await updateDoc(submissionRef, {
           status: 'approved',
           reviewedAt: new Date().getTime(),
-          updatedAt: new Date().getTime(),
-          transactionHash: signature
+          updatedAt: new Date().getTime()
         });
         
-        // Update bounty status and approved hunter info in Firebase
+        // Update bounty status in Firebase
         await updateDoc(bountyRef, {
           approvedCount: (bountyData.approvedCount || 0) + 1,
           status: BountyStatusFirebase.APPROVED,
           approvedHunter: hunterAddress,
-          updatedAt: new Date().getTime(),
-          transactionHash: signature
+          updatedAt: new Date().getTime()
         });
         
-        console.log(`Successfully approved submission ${submissionId} for bounty ${bountyId}`);
-        return signature;
-      } catch (walletError) {
-        console.error('Error with wallet interaction:', walletError);
+        console.log(`Successfully approved submission ${submissionId} for bounty ${bountyId} in Firebase`);
+        return 'firebase-approval-only';
+        
+      } catch (dbError) {
+        console.error('Error updating approval status in database:', dbError);
         throw new Error(
-          walletError instanceof Error
-            ? `Wallet Error: ${walletError.message}`
-            : 'Unknown wallet error occurred'
+          dbError instanceof Error
+            ? `Database Error: ${dbError.message}`
+            : 'Unknown database error occurred'
         );
       }
     } catch (error) {

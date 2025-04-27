@@ -14,6 +14,8 @@ import { Timestamp } from 'firebase/firestore';
 import { SolanaService } from '@/services/solana';
 import { useWallet } from '@solana/wallet-adapter-react';
 import { WalletMultiButton } from '@solana/wallet-adapter-react-ui';
+import { PublicKey } from '@solana/web3.js';
+import { Bounty } from '@/services/bounty';
 
 interface IBounty {
   id: string;
@@ -298,45 +300,48 @@ export default function SubmissionDetailPage() {
     }
   };
 
-  const handleApprove = async () => {
+  const handleApproveSubmission = async () => {
     if (!isOwner) {
       console.log('Cannot approve: Not owner');
       return;
     }
     
-    setShowApproveDialog(true);
-  };
-  
-  const handleApproveConfirmed = async () => {
     try {
       setProcessingAction(true);
-      console.log('Approving submission directly in Firestore...');
+      console.log('Approving submission status...');
       
-      // Update the submission status to approved
-      const submissionRef = doc(db, 'submissions', submissionId as string);
-      await updateDoc(submissionRef, {
-        status: 'approved',
-        updatedAt: Timestamp.now(),
-        reviewedAt: Timestamp.now(),
-        reviewerComments: reviewComment || 'Approved',
-      });
-      
-      console.log('Submission approved successfully');
-      
-      // Update the bounty with approval
-      const bountyRef = doc(db, 'bounties', id as string);
-      const bountySnapshot = await getDoc(bountyRef);
-      
-      if (bountySnapshot.exists()) {
-        const bountyData = bountySnapshot.data();
-        await updateDoc(bountyRef, {
-          approvedCount: (bountyData.approvedCount || 0) + 1,
-          status: 'completed',
-          updatedAt: Timestamp.now()
-        });
+      // First, get the hunter wallet address
+      if (!submission) {
+        throw new Error('Submission data not found');
       }
       
-      // Refresh the page
+      // Get the auditor wallet address from multiple possible sources
+      const auditorWalletAddress = 
+        submission.auditorWalletAddress || 
+        (typeof submission.auditor === 'object' && submission.auditor?.walletAddress) ||
+        (typeof submission.auditor === 'string' ? submission.auditor : null);
+        
+      if (!auditorWalletAddress) {
+        throw new Error('Hunter wallet address not found. Please ensure the auditor has connected their wallet.');
+      }
+      
+      // Call the static method on Bounty class to approve the submission in Firebase only
+      // This doesn't perform the blockchain transaction yet
+      await Bounty.approveSubmission(id as string, submissionId as string);
+      
+      console.log('Submission approved successfully! Ready for payment.');
+      
+      // Update UI
+      const updatedSubmission = {
+        ...submission,
+        status: 'approved'
+      };
+      setSubmission(updatedSubmission as ISubmission);
+      
+      // Show success message and explanation about payment
+      alert('Submission approved! You can now pay the auditor by clicking the "Pay Auditor Now" button.');
+      
+      // Refresh the page to show the payment button
       window.location.reload();
       
     } catch (error) {
@@ -437,13 +442,27 @@ export default function SubmissionDetailPage() {
       return;
     }
     
+    if (submission.status !== 'approved') {
+      alert('This submission must be approved before payment can be made.');
+      return;
+    }
+    
     // Get the auditor wallet address from multiple sources
     const auditorWalletAddress = 
       submission.auditorWalletAddress || 
-      submission.auditor?.walletAddress;
+      (submission.auditor && typeof submission.auditor === 'object' ? submission.auditor.walletAddress : undefined);
     
     if (!auditorWalletAddress) {
       alert('No wallet address found for the auditor. Please ensure the auditor has connected their wallet.');
+      return;
+    }
+    
+    // Validate the wallet address
+    try {
+      new PublicKey(auditorWalletAddress);
+      console.log(`Valid auditor wallet address: ${auditorWalletAddress}`);
+    } catch (err) {
+      alert(`Invalid auditor wallet address format: ${auditorWalletAddress}`);
       return;
     }
     
@@ -483,7 +502,7 @@ export default function SubmissionDetailPage() {
       // Update submission object in state
       submission.payoutAmount = exactAmount;
       
-      // Release funds from escrow instead of direct payment
+      // Release funds from escrow - THIS is the actual on-chain transaction
       console.log(`Releasing ${exactAmount} SOL from escrow to ${auditorWalletAddress}`);
       const result = await SolanaService.releasePaymentFromEscrow(
         wallet,
@@ -551,6 +570,15 @@ export default function SubmissionDetailPage() {
     } finally {
       setPaymentProcessing(false);
     }
+  };
+
+  // Simple handler for the approve button click
+  const handleApproveButton = () => {
+    if (!isOwner) {
+      console.log('Cannot approve: Not owner');
+      return;
+    }
+    setShowApproveDialog(true);
   };
 
   if (loading || authLoading) {
@@ -738,7 +766,7 @@ export default function SubmissionDetailPage() {
                 <div className="flex space-x-4">
                   <button
                     type="button"
-                    onClick={() => setShowApproveDialog(true)}
+                    onClick={handleApproveButton}
                     disabled={processingAction}
                     className="inline-flex items-center px-4 py-2 border border-transparent text-sm font-medium rounded-md shadow-sm text-white bg-green-600 hover:bg-green-700 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-green-500"
                   >
@@ -862,9 +890,14 @@ export default function SubmissionDetailPage() {
         <SubmissionVerificationDialog
           isOpen={showApproveDialog}
           onClose={() => setShowApproveDialog(false)}
-          onConfirm={handleApproveConfirmed}
+          onConfirm={handleApproveSubmission}
           title="Approve Submission"
-          description={`Are you sure you want to approve this submission? This will allocate ${submission?.payoutAmount || '–'} SOL as a reward.`}
+          description={`Are you sure you want to approve this submission? This is a two-step process:
+
+1. First, you will approve the submission (current step).
+2. Then, you'll see a "Pay Auditor Now" button to actually release the funds.
+
+No funds will be transferred until you complete the second step.`}
           action="approve"
           isProcessing={processingAction}
           error={error}

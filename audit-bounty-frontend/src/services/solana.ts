@@ -432,12 +432,28 @@ export class SolanaService {
     }
     
     try {
+      // Validate hunterPubkey
+      if (!hunterPubkey) {
+        throw new Error('Hunter public key is missing or undefined');
+      }
+      
+      // Validate that hunterPubkey is a valid Solana address
+      let hunterPublicKey;
+      try {
+        hunterPublicKey = new PublicKey(hunterPubkey);
+        // Log for debugging
+        console.log(`✓ Valid hunter public key: ${hunterPublicKey.toString()}`);
+      } catch (err) {
+        console.error('Invalid hunter public key format:', hunterPubkey);
+        throw new Error(`Invalid hunter public key format: ${hunterPubkey}`);
+      }
+
       // Create the transaction
       const transaction = await approveSubmission(
         this.connection,
         this.wallet.publicKey,
         new PublicKey(bountyPda),
-        new PublicKey(hunterPubkey)
+        hunterPublicKey // Pass the validated PublicKey object
       );
       
       // Set the transaction fee payer
@@ -617,8 +633,30 @@ export class SolanaService {
       const connection = getSolanaConnection();
       
       // Convert bountyId and recipient to PublicKey
-      const bountyPda = new PublicKey(bountyId);
-      const recipientPubkey = new PublicKey(recipientAddress);
+      let bountyPda: PublicKey;
+      let recipientPubkey: PublicKey;
+      
+      try {
+        bountyPda = new PublicKey(bountyId);
+        console.log(`Converted bounty ID to PublicKey: ${bountyPda.toString()}`);
+      } catch (pkeyError) {
+        console.error('Invalid bounty ID format:', pkeyError);
+        return { 
+          status: 'error', 
+          message: `Invalid bounty ID format: ${bountyId}` 
+        };
+      }
+      
+      try {
+        recipientPubkey = new PublicKey(recipientAddress);
+        console.log(`Converted recipient address to PublicKey: ${recipientPubkey.toString()}`);
+      } catch (pkeyError) {
+        console.error('Invalid recipient address format:', pkeyError);
+        return { 
+          status: 'error', 
+          message: `Invalid recipient wallet address: ${recipientAddress}` 
+        };
+      }
       
       // Derive the vault PDA from the bounty PDA
       const [vaultPda, _] = await deriveVaultPDA(bountyPda);
@@ -626,7 +664,11 @@ export class SolanaService {
       console.log(`Releasing payment from escrow: ${amount} SOL`);
       console.log(`Bounty PDA: ${bountyPda.toString()}`);
       console.log(`Vault PDA: ${vaultPda.toString()}`);
-      console.log(`Recipient: ${recipientPubkey.toString()}`);
+      console.log(`Hunter address: ${recipientPubkey.toString()}`);
+      console.log(`Creator/Wallet address: ${wallet.publicKey.toString()}`);
+      
+      // Verbose account verification
+      console.log("Performing detailed account validation...");
       
       // Verify the bounty account exists before proceeding
       const bountyAccount = await connection.getAccountInfo(bountyPda);
@@ -635,6 +677,18 @@ export class SolanaService {
         return {
           status: 'error',
           message: `Bounty account ${bountyId} not found on the blockchain`
+        };
+      }
+      
+      console.log(`Bounty account found. Owner: ${bountyAccount.owner.toString()}`);
+      console.log(`Bounty account data length: ${bountyAccount.data.length} bytes`);
+      
+      // Verify the bounty is owned by our program
+      if (!bountyAccount.owner.equals(programId)) {
+        console.error(`Bounty account has incorrect owner. Expected: ${programId.toString()}, Found: ${bountyAccount.owner.toString()}`);
+        return {
+          status: 'error',
+          message: `Bounty account has incorrect owner: ${bountyAccount.owner.toString()}`
         };
       }
       
@@ -648,9 +702,27 @@ export class SolanaService {
         };
       }
       
-      // Check bounty data to ensure it's in the correct state (Open)
+      console.log(`Vault account found. Owner: ${vaultAccount.owner.toString()}`);
+      console.log(`Vault balance: ${vaultAccount.lamports / LAMPORTS_PER_SOL} SOL`);
+      
+      // Check the hunter account exists
+      const hunterAccount = await connection.getAccountInfo(recipientPubkey);
+      console.log(`Hunter account exists: ${hunterAccount !== null}`);
+      if (hunterAccount) {
+        console.log(`Hunter account balance: ${hunterAccount.lamports / LAMPORTS_PER_SOL} SOL`);
+      }
+      
+      // Try to decode the bounty data
       try {
         const bountyData = bountySchema.decode(bountyAccount.data);
+        console.log("Bounty data decoded successfully!");
+        console.log(`Bounty Status: ${BountyStatus[bountyData.status]}`);
+        console.log(`Bounty Creator: ${bountyData.creator.toString()}`);
+        console.log(`Bounty Amount: ${bountyData.amount / LAMPORTS_PER_SOL} SOL`);
+        console.log(`Bounty Hunter: ${bountyData.hunter ? bountyData.hunter.toString() : 'None'}`);
+        console.log(`Initialized: ${bountyData.initialized}`);
+        
+        // Verify bounty is in Open state
         if (bountyData.status !== BountyStatus.Open) {
           return {
             status: 'error',
@@ -667,102 +739,96 @@ export class SolanaService {
         }
       } catch (decodeError) {
         console.error('Error decoding bounty data:', decodeError);
+        console.log('Raw bounty data:', bountyAccount.data);
         return {
           status: 'error',
           message: 'Failed to read bounty data from blockchain. The account may not be a valid bounty account.'
         };
       }
       
-      // Create a transaction for approving the submission
-      // This uses the approveSubmission transaction which sets the hunter
-      // and marks the bounty as approved
+      // IMPORTANT: Create a transaction for approving the submission
+      // Pass the hunter address as a string to ensure proper conversion inside the function
       const transaction = await approveSubmission(
         connection,
         wallet.publicKey,
         bountyPda,
-        recipientPubkey
+        recipientAddress // Pass as string - will be converted properly in the function
       );
       
-      // Add priority fee to increase chances of success
+      console.log("Transaction created with approveSubmission instruction");
+      
+      // Add a ComputeBudget instruction to increase compute limits for complex operations
       transaction.add(
-        ComputeBudgetProgram.setComputeUnitPrice({
-          microLamports: 100_000
+        ComputeBudgetProgram.setComputeUnitLimit({
+          units: 400000 // Double the default compute units
         })
       );
       
       // Set recent blockhash and fee payer
-      const { blockhash } = await connection.getLatestBlockhash('confirmed');
+      const { blockhash, lastValidBlockHeight } = await connection.getLatestBlockhash('confirmed');
       transaction.recentBlockhash = blockhash;
       transaction.feePayer = wallet.publicKey;
       
-      // Sign and send transaction
+      console.log(`Transaction prepared with blockhash: ${blockhash}`);
+      console.log(`Last valid block height: ${lastValidBlockHeight}`);
+      
+      // Sign and send transaction with preflight checks
       try {
         const signedTx = await wallet.signTransaction(transaction);
+        console.log("Transaction signed successfully");
+        
         const signature = await connection.sendRawTransaction(signedTx.serialize(), {
           skipPreflight: false,
           preflightCommitment: 'confirmed'
         });
         
-        // Confirm transaction with a more reliable method
         console.log(`Transaction sent with signature: ${signature}`);
-        console.log("Confirming transaction...");
         
-        // Try to use HTTP polling for confirmation instead of WebSockets
-        try {
-          // Poll for confirmation status
-          console.log("Using HTTP polling for confirmation...");
-          let confirmed = false;
-          let attempts = 0;
+        // Use polling for confirmation
+        let confirmed = false;
+        let attempts = 0;
+        
+        while (!confirmed && attempts < 30) {
+          const signatureStatus = await connection.getSignatureStatus(signature);
           
-          while (!confirmed && attempts < 30) {
-            const signatureStatus = await connection.getSignatureStatus(signature);
-            
-            if (signatureStatus && signatureStatus.value) {
-              // Check for errors
-              if (signatureStatus.value.err) {
-                const errorDetails = JSON.stringify(signatureStatus.value.err);
-                console.error("Transaction failed:", errorDetails);
-                return {
-                  status: 'error',
-                  signature,
-                  message: `Transaction failed: ${errorDetails}`
-                };
-              }
-              
-              // Check confirmation status
-              if (signatureStatus.value.confirmationStatus === 'confirmed' ||
-                  signatureStatus.value.confirmationStatus === 'finalized') {
-                confirmed = true;
-                console.log(`Transaction confirmed with status: ${signatureStatus.value.confirmationStatus}`);
-                break;
-              }
+          if (signatureStatus && signatureStatus.value) {
+            // Check for errors
+            if (signatureStatus.value.err) {
+              const errorDetails = JSON.stringify(signatureStatus.value.err);
+              console.error("Transaction failed:", errorDetails);
+              return {
+                status: 'error',
+                signature,
+                message: `Transaction failed: ${errorDetails}`
+              };
             }
             
-            // Wait before polling again
-            await new Promise(resolve => setTimeout(resolve, 1000));
-            attempts++;
+            // Check confirmation status
+            if (signatureStatus.value.confirmationStatus === 'confirmed' ||
+                signatureStatus.value.confirmationStatus === 'finalized') {
+              confirmed = true;
+              console.log(`Transaction confirmed with status: ${signatureStatus.value.confirmationStatus}`);
+              break;
+            }
           }
           
-          if (confirmed) {
-            return {
-              status: 'success',
-              signature,
-              message: `Successfully released ${amount} SOL to ${recipientAddress}`
-            };
-          } else {
-            console.warn("Transaction not confirmed after polling");
-            return {
-              status: 'error',
-              signature,
-              message: `Transaction may have failed, could not confirm after ${attempts} attempts`
-            };
-          }
-        } catch (pollError) {
-          console.error("Error polling for transaction status:", pollError);
+          // Wait before polling again
+          await new Promise(resolve => setTimeout(resolve, 1000));
+          attempts++;
+        }
+        
+        if (confirmed) {
+          return {
+            status: 'success',
+            signature,
+            message: `Successfully released ${amount} SOL to ${recipientAddress}`
+          };
+        } else {
+          console.warn("Transaction not confirmed after polling");
           return {
             status: 'error',
             signature,
-            message: `Error confirming transaction: ${pollError instanceof Error ? pollError.message : 'Unknown error'}`
+            message: `Transaction may have failed, could not confirm after ${attempts} attempts`
           };
         }
       } catch (txError) {
@@ -775,7 +841,7 @@ export class SolanaService {
           let logs = '';
           
           try {
-            // Use regex to extract the logs section from the error message
+            // Extract logs
             const logsMatch = errorMessage.match(/Logs:\s*(\[[\s\S]*?\])/);
             if (logsMatch && logsMatch[1]) {
               logs = logsMatch[1];

@@ -150,37 +150,89 @@ export async function submitWork(
 }
 
 /**
- * Approve a hunter's submission
+ * Creates a transaction for approving a submission
  */
 export async function approveSubmission(
   connection: Connection,
   creator: PublicKey,
   bountyPda: PublicKey,
-  hunter: PublicKey
+  hunter: string | PublicKey
 ): Promise<Transaction> {
-  // Create instruction data buffer
-  const data = Buffer.alloc(100); // allocate enough space
-  const instructionData = {
-    variant: InstructionVariant.ApproveSubmission,
-    hunter,
-  };
-  
-  const length = approveSubmissionLayout.encode(instructionData, data);
-  const instructionBuffer = data.slice(0, length);
-  
-  // Create the transaction instruction
-  const instruction = new TransactionInstruction({
-    keys: [
-      { pubkey: creator, isSigner: true, isWritable: false },
-      { pubkey: bountyPda, isSigner: false, isWritable: true },
-      { pubkey: hunter, isSigner: false, isWritable: false },
-    ],
-    programId,
-    data: instructionBuffer,
-  });
-  
-  // Create and return transaction
-  return new Transaction().add(instruction);
+  try {
+    // Validate input parameters
+    if (!creator) {
+      throw new Error('Creator public key is missing or undefined');
+    }
+    
+    if (!bountyPda) {
+      throw new Error('Bounty PDA is missing or undefined');
+    }
+    
+    if (!hunter) {
+      throw new Error('Hunter public key is missing or undefined');
+    }
+    
+    // Convert hunter to PublicKey if it's a string
+    let hunterPubkey: PublicKey;
+    try {
+      hunterPubkey = typeof hunter === 'string' ? new PublicKey(hunter) : hunter;
+      console.log(`Creating approveSubmission transaction with hunter: ${hunterPubkey.toString()}`);
+    } catch (err) {
+      console.error('Failed to create PublicKey from hunter:', hunter);
+      throw new Error(`Invalid hunter public key: ${typeof hunter === 'string' ? hunter : 'object'}`);
+    }
+
+    // Get accounts involved
+    const systemProgram = SystemProgram.programId;
+
+    console.log(`Program ID: ${programId.toString()}`);
+    console.log(`Bounty PDA: ${bountyPda.toString()}`);
+    console.log(`Hunter: ${hunterPubkey.toString()}`);
+
+    // Create instruction data directly rather than using Borsh
+    // This avoids BN.js issues when encoding the PublicKey
+    const instructionData = Buffer.alloc(33); // 1 byte for variant + 32 bytes for PublicKey
+    
+    // Set variant to ApproveSubmission (2) - using the correct enum value
+    instructionData.writeUInt8(InstructionVariant.ApproveSubmission, 0);
+    
+    // Copy hunter pubkey bytes to the buffer
+    const hunterBuffer = hunterPubkey.toBuffer();
+    if (hunterBuffer.length !== 32) {
+      throw new Error(`Invalid hunter public key buffer length: ${hunterBuffer.length}`);
+    }
+    hunterBuffer.copy(instructionData, 1);
+    
+    console.log(`Created instruction data buffer with length: ${instructionData.length}`);
+    console.log(`Instruction variant: ${instructionData[0]}`);
+
+    const instruction = new TransactionInstruction({
+      programId,
+      keys: [
+        { pubkey: creator, isSigner: true, isWritable: true },
+        { pubkey: bountyPda, isSigner: false, isWritable: true },
+        { pubkey: hunterPubkey, isSigner: false, isWritable: false }, // Add hunter account as non-signer
+        { pubkey: systemProgram, isSigner: false, isWritable: false },
+      ],
+      data: instructionData,
+    });
+
+    console.log("Transaction instruction created successfully");
+
+    const transaction = new Transaction().add(instruction);
+    transaction.feePayer = creator;
+
+    // Get the latest blockhash
+    const { blockhash, lastValidBlockHeight } = await connection.getLatestBlockhash();
+    transaction.recentBlockhash = blockhash;
+    transaction.lastValidBlockHeight = lastValidBlockHeight;
+
+    return transaction;
+  } catch (error: unknown) {
+    console.error('Error creating approve submission transaction:', error);
+    const errorMessage = error instanceof Error ? error.message : String(error);
+    throw new Error(`Failed to create approve submission transaction: ${errorMessage}`);
+  }
 }
 
 /**
