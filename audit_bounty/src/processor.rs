@@ -225,7 +225,26 @@ impl Processor {
             initialized: true,
         };
 
+        // Log the initialization for debugging
+        msg!("Creating new bounty with initialized=true");
+        msg!("Creator: {}", creator_info.key);
+        msg!("Amount: {}", amount);
+        msg!("Deadline: {}", deadline);
+        msg!("Status: Open");
+        
+        // Serialize the account data
         bounty_account.serialize(&mut *bounty_account_info.data.borrow_mut())?;
+        
+        // Verify initialization after serialization
+        let verify_data = BountyAccount::try_from_slice(&bounty_account_info.data.borrow())?;
+        msg!("Verification: Account initialized = {}", verify_data.is_initialized());
+        
+        // Check if initialized flag is at expected offset (for debugging)
+        if bounty_account_info.data.borrow().len() >= 80 {
+            // The exact offset depends on your struct layout
+            msg!("Raw initialized flag at offset 74: {}", 
+                 bounty_account_info.data.borrow()[74] != 0);
+        }
         
         msg!("Bounty created by {} with {} lamports", creator_info.key, amount);
         
@@ -298,11 +317,31 @@ impl Processor {
             return Err(ProgramError::InvalidArgument);
         }
 
-        // Load bounty data
-        let bounty_data = BountyAccount::try_from_slice(&bounty_account_info.data.borrow())?;
+        // Add more debugging information about account data
+        msg!("Bounty account data length: {}", bounty_account_info.data.borrow().len());
+        
+        // Try to deserialize with better error handling
+        let bounty_data = match BountyAccount::try_from_slice(&bounty_account_info.data.borrow()) {
+            Ok(data) => {
+                msg!("Successfully deserialized bounty data");
+                data
+            },
+            Err(e) => {
+                msg!("Failed to deserialize bounty account data: {:?}", e);
+                // Log the raw data for debugging
+                if bounty_account_info.data.borrow().len() >= 80 {
+                    msg!("First 32 bytes (creator): {:?}", &bounty_account_info.data.borrow()[0..32]);
+                    msg!("Hunter option flag: {}", bounty_account_info.data.borrow()[32]);
+                    msg!("Initialized flag (expected at offset 74): {}", 
+                         bounty_account_info.data.borrow()[74] != 0);
+                }
+                return Err(ProgramError::InvalidAccountData);
+            }
+        };
         
         // Validate bounty state
         if !bounty_data.is_initialized() {
+            msg!("Bounty account is NOT initialized!");
             return Err(ProgramError::UninitializedAccount);
         }
 
@@ -318,11 +357,15 @@ impl Processor {
         let mut bounty_data = BountyAccount::try_from_slice(&bounty_account_info.data.borrow())?;
         bounty_data.status = BountyStatus::Approved;
         bounty_data.hunter = Some(hunter);
+        bounty_data.initialized = true;  // Explicitly set initialized to true again
 
         // Save updated bounty data
         bounty_data.serialize(&mut *bounty_account_info.data.borrow_mut())?;
         
         msg!("Submission approved for hunter: {}", hunter_info.key);
+        msg!("Bounty status updated to Approved");
+        msg!("Hunter set to: {}", hunter);
+        msg!("Initialized flag set to: true");
         
         Ok(())
     }

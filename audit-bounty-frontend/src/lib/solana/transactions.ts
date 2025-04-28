@@ -6,7 +6,8 @@ import {
   TransactionInstruction,
   SYSVAR_RENT_PUBKEY,
   sendAndConfirmTransaction,
-  Keypair
+  Keypair,
+  ComputeBudgetProgram
 } from '@solana/web3.js';
 import { Buffer } from 'buffer';
 import { programId, deriveBountyPDA, deriveVaultPDA, solToLamports, getSolanaConnection } from './config';
@@ -159,79 +160,195 @@ export async function approveSubmission(
   hunter: string | PublicKey
 ): Promise<Transaction> {
   try {
-    // Validate input parameters
-    if (!creator) {
-      throw new Error('Creator public key is missing or undefined');
-    }
+    console.log("=== CREATING APPROVE SUBMISSION TRANSACTION ===");
     
-    if (!bountyPda) {
-      throw new Error('Bounty PDA is missing or undefined');
-    }
+    // Convert hunter string to PublicKey if needed
+    const hunterPubkey = typeof hunter === 'string' ? new PublicKey(hunter) : hunter;
     
-    if (!hunter) {
-      throw new Error('Hunter public key is missing or undefined');
-    }
-    
-    // Convert hunter to PublicKey if it's a string
-    let hunterPubkey: PublicKey;
-    try {
-      hunterPubkey = typeof hunter === 'string' ? new PublicKey(hunter) : hunter;
-      console.log(`Creating approveSubmission transaction with hunter: ${hunterPubkey.toString()}`);
-    } catch (err) {
-      console.error('Failed to create PublicKey from hunter:', hunter);
-      throw new Error(`Invalid hunter public key: ${typeof hunter === 'string' ? hunter : 'object'}`);
-    }
-
-    // Get accounts involved
-    const systemProgram = SystemProgram.programId;
-
-    console.log(`Program ID: ${programId.toString()}`);
+    // Log the key parameters
+    console.log(`Creator: ${creator.toString()}`);
     console.log(`Bounty PDA: ${bountyPda.toString()}`);
     console.log(`Hunter: ${hunterPubkey.toString()}`);
-
-    // Create instruction data directly rather than using Borsh
-    // This avoids BN.js issues when encoding the PublicKey
-    const instructionData = Buffer.alloc(33); // 1 byte for variant + 32 bytes for PublicKey
     
-    // Set variant to ApproveSubmission (2) - using the correct enum value
-    instructionData.writeUInt8(InstructionVariant.ApproveSubmission, 0);
+    // Verify PDA derivation to ensure it matches the program's expectations
+    console.log("Verifying PDA derivation...");
     
-    // Copy hunter pubkey bytes to the buffer
-    const hunterBuffer = hunterPubkey.toBuffer();
-    if (hunterBuffer.length !== 32) {
-      throw new Error(`Invalid hunter public key buffer length: ${hunterBuffer.length}`);
+    // Try to recover the original seed used to create this bounty
+    // This is a best-effort attempt since we don't know the exact seed that was used
+    try {
+      // Fetch the bounty account from Firebase to check if original seed was saved
+      console.log("Looking for bounty creation details...");
+    
+      // If you can't find original seed, you can try possible seed patterns
+      // For example, seeds using timestamp-based patterns
+      let possibleSeeds = [
+        Buffer.from("bounty"),
+      ];
+    
+      console.log("Testing some common seed patterns:");
+      let seedsFound = false;
+      
+      // Iterate through Firebase or other sources to find matching seeds
+      // This is just a placeholder for actual implementation
+      
+      if (!seedsFound) {
+        console.log("WARNING: Could not verify PDA derivation - original seed unknown");
+      }
+    } catch (pdaErr) {
+      console.error("Error verifying PDA:", pdaErr);
     }
-    hunterBuffer.copy(instructionData, 1);
     
-    console.log(`Created instruction data buffer with length: ${instructionData.length}`);
-    console.log(`Instruction variant: ${instructionData[0]}`);
-
+    // Fetch the bounty account to validate it
+    console.log("Fetching bounty account...");
+    const bountyAccount = await connection.getAccountInfo(bountyPda);
+    if (!bountyAccount) {
+      throw new Error(`Bounty account ${bountyPda.toString()} not found`);
+    }
+    console.log("Bounty account found, data length:", bountyAccount.data.length);
+    
+    // Check if account is owned by our program
+    if (bountyAccount.owner.toString() !== programId.toString()) {
+      console.error(`Account owner mismatch: ${bountyAccount.owner.toString()} vs expected ${programId.toString()}`);
+      throw new Error(`Bounty account is not owned by our program`);
+    }
+    
+    // Check if account has enough data for at least the minimum expected structure
+    if (bountyAccount.data.length < 80) { // Minimum expected size, adjust as needed
+      console.error(`Account data too small: ${bountyAccount.data.length} bytes`);
+      throw new Error("Account data is too small to be a valid bounty account");
+    }
+    
+    // Log raw account data in chunks for debugging
+    console.log("Raw account data (hex):", Buffer.from(bountyAccount.data).toString('hex'));
+    
+    // Try to manually parse critical fields from account data
+    try {
+      // This is a simplified attempt to parse the raw data
+      // Adjust offsets based on your exact account structure
+      
+      // Read creator public key (first 32 bytes of the account data)
+      const creatorPubkeyBytes = bountyAccount.data.slice(0, 32);
+      const parsedCreator = new PublicKey(creatorPubkeyBytes);
+      console.log("Parsed creator from account data:", parsedCreator.toString());
+      
+      // Read hunter option flag (1 byte after creator)
+      const hasHunter = bountyAccount.data[32] === 1;
+      console.log("Has hunter assigned:", hasHunter);
+      
+      // If hunter is present, read hunter public key (next 32 bytes)
+      if (hasHunter) {
+        const hunterPubkeyBytes = bountyAccount.data.slice(33, 65);
+        const parsedHunter = new PublicKey(hunterPubkeyBytes);
+        console.log("Parsed hunter from account data:", parsedHunter.toString());
+      }
+      
+      // Read status (should be at a specific offset depending on account structure)
+      // This is an approximation - adjust based on your exact account layout
+      const statusOffset = 73; // Example offset, adjust based on your struct
+      const status = bountyAccount.data[statusOffset];
+      console.log("Parsed status from account data:", status);
+      
+      // Check if the account is initialized
+      const initializedOffset = 74; // Example offset, adjust based on your struct
+      const initialized = bountyAccount.data[initializedOffset] === 1;
+      console.log("Account initialized:", initialized);
+      
+      if (!initialized) {
+        throw new Error("Bounty account is not initialized");
+      }
+    } catch (parseErr) {
+      console.warn("Error parsing account data manually:", parseErr);
+      console.warn("This might be due to account structure mismatch");
+    }
+    
+    // Step 1: Create the instruction data
+    // The data needs to match the BountyInstruction::ApproveSubmission { hunter } struct
+    // in the Rust program - which expects Borsh serialization
+    
+    // Create a buffer for the instruction data
+    // 1 byte for the variant + 32 bytes for the hunter's pubkey
+    const dataBuffer = Buffer.alloc(33);
+    
+    // Write the instruction variant (2 for ApproveSubmission)
+    dataBuffer.writeUInt8(InstructionVariant.ApproveSubmission, 0);
+    
+    // Write the hunter's pubkey
+    const hunterBytes = hunterPubkey.toBuffer();
+    hunterBytes.copy(dataBuffer, 1);
+    
+    console.log(`Instruction data length: ${dataBuffer.length} bytes`);
+    console.log(`Hex instruction data: ${dataBuffer.toString('hex')}`);
+    
+    // Step 2: Set up the accounts exactly as expected by the program
+    // The Rust code accesses these accounts in this EXACT order:
+    const accounts = [
+      { pubkey: creator, isSigner: true, isWritable: true },      // Creator (signer)
+      { pubkey: bountyPda, isSigner: false, isWritable: true },   // Bounty account
+      { pubkey: hunterPubkey, isSigner: false, isWritable: false } // Hunter account
+    ];
+    
+    console.log("Accounts:");
+    accounts.forEach((acct, i) => {
+      console.log(`  ${i}: ${acct.pubkey.toString()}`);
+    });
+    
+    // Step 3: Create the transaction instruction
     const instruction = new TransactionInstruction({
       programId,
-      keys: [
-        { pubkey: creator, isSigner: true, isWritable: true },
-        { pubkey: bountyPda, isSigner: false, isWritable: true },
-        { pubkey: hunterPubkey, isSigner: false, isWritable: false }, // Add hunter account as non-signer
-        { pubkey: systemProgram, isSigner: false, isWritable: false },
-      ],
-      data: instructionData,
+      keys: accounts,
+      data: dataBuffer
     });
-
-    console.log("Transaction instruction created successfully");
-
-    const transaction = new Transaction().add(instruction);
+    
+    // Step 4: Create the transaction and add the instruction
+    const transaction = new Transaction();
+    transaction.add(instruction);
     transaction.feePayer = creator;
-
-    // Get the latest blockhash
-    const { blockhash, lastValidBlockHeight } = await connection.getLatestBlockhash();
+    
+    // Step 5: Get and set a recent blockhash
+    const { blockhash } = await connection.getLatestBlockhash();
     transaction.recentBlockhash = blockhash;
-    transaction.lastValidBlockHeight = lastValidBlockHeight;
-
+    
+    // Simulate the transaction to catch any errors
+    try {
+      console.log("Simulating transaction...");
+      const simulation = await connection.simulateTransaction(transaction);
+      if (simulation.value.err) {
+        console.error("Simulation failed:", simulation.value.err);
+        console.error("Simulation logs:", simulation.value.logs);
+        
+        // Extract more detailed error information if available
+        if (simulation.value.logs && simulation.value.logs.length > 0) {
+          // Look for program log messages that might have more details
+          for (const log of simulation.value.logs) {
+            if (log.includes("Program log:")) {
+              console.error("Program log message:", log);
+            }
+          }
+        }
+        
+        // Check if it's a specific type of error
+        if (JSON.stringify(simulation.value.err).includes("BorshIoError")) {
+          console.error("DETECTED BORSH SERIALIZATION ERROR:");
+          console.error("This usually means the account data structure doesn't match what the program expects");
+          console.error("Possible causes:");
+          console.error("1. Program was updated with a new account structure");
+          console.error("2. Account was created with old version of the program");
+          console.error("3. Accounts need to be migrated to the new structure");
+        }
+        
+        throw new Error(`Transaction simulation failed: ${JSON.stringify(simulation.value.err)}`);
+      }
+      console.log("Simulation successful");
+    } catch (err) {
+      console.error("Error simulating transaction:", err);
+      throw err;
+    }
+    
+    console.log("=== APPROVE SUBMISSION TRANSACTION CREATED ===");
     return transaction;
-  } catch (error: unknown) {
-    console.error('Error creating approve submission transaction:', error);
-    const errorMessage = error instanceof Error ? error.message : String(error);
-    throw new Error(`Failed to create approve submission transaction: ${errorMessage}`);
+  } catch (error) {
+    console.error('Error creating ApproveSubmission transaction:', error);
+    throw error;
   }
 }
 
@@ -396,21 +513,36 @@ export async function confirmTransaction(
   console.log(`Confirming transaction ${signature} using HTTP polling...`);
   
   const startTime = Date.now();
+  let attempts = 0;
   
-  // Poll until timeout
+  // Poll until timeout with exponential backoff
   while (Date.now() - startTime < timeout) {
+    attempts++;
     try {
+      // Get the transaction status
       const status = await connection.getSignatureStatus(signature);
       
+      // Log each polling attempt
+      console.log(`Polling attempt ${attempts}: Status = ${status?.value?.confirmationStatus || 'not found'}`);
+      
       if (!status || !status.value) {
-        // Transaction not found yet, wait and retry
-        await new Promise(resolve => setTimeout(resolve, 1000));
+        // If we couldn't find the transaction after multiple attempts, it might have failed
+        if (attempts > 10) {
+          console.warn(`Transaction ${signature} not found after ${attempts} attempts`);
+        }
+        
+        // Wait with exponential backoff (up to 5 seconds max)
+        const backoff = Math.min(1000 * Math.pow(1.5, attempts - 1), 5000);
+        console.log(`Waiting ${backoff}ms before retrying...`);
+        await new Promise(resolve => setTimeout(resolve, backoff));
         continue;
       }
       
       // Check if transaction failed
       if (status.value.err) {
         console.error('Transaction failed:', status.value.err);
+        // Return the full error details for debugging
+        console.error('Full error details:', JSON.stringify(status.value.err, null, 2));
         return false;
       }
       
@@ -420,18 +552,23 @@ export async function confirmTransaction(
         status.value.confirmationStatus === 'finalized'
       ) {
         console.log(`Transaction ${signature} confirmed with status: ${status.value.confirmationStatus}`);
+        console.log(`Confirmation took ${(Date.now() - startTime) / 1000} seconds and ${attempts} attempts`);
         return true;
       }
       
-      // Wait before polling again
-      await new Promise(resolve => setTimeout(resolve, 2000));
+      // Wait with exponential backoff (up to 5 seconds max)
+      const backoff = Math.min(1000 * Math.pow(1.5, attempts - 1), 5000);
+      console.log(`Waiting ${backoff}ms before retrying...`);
+      await new Promise(resolve => setTimeout(resolve, backoff));
     } catch (error) {
       console.warn('Error checking transaction status:', error);
-      // Wait before retrying
-      await new Promise(resolve => setTimeout(resolve, 2000));
+      
+      // Wait with exponential backoff before retrying
+      const backoff = Math.min(1000 * Math.pow(1.5, attempts - 1), 5000);
+      await new Promise(resolve => setTimeout(resolve, backoff));
     }
   }
   
-  console.error(`Transaction confirmation timed out after ${timeout}ms`);
+  console.error(`Transaction confirmation timed out after ${timeout / 1000} seconds and ${attempts} attempts`);
   return false;
 } 

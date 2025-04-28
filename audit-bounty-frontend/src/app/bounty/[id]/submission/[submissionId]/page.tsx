@@ -395,74 +395,31 @@ export default function SubmissionDetailPage() {
     }
   };
 
-  const handleClaimReward = async () => {
-    if (!isAuditor || submission?.status !== 'approved') return;
-    setProcessingAction(true);
-    setError(null);
-    
-    try {
-      console.log('Marking reward as claimed...');
-      
-      // Update submission as claimed
-      const submissionRef = doc(db, 'submissions', submissionId as string);
-      await updateDoc(submissionRef, {
-        claimed: true,
-        claimedAt: Timestamp.now(),
-        updatedAt: Timestamp.now()
-      });
-      
-      console.log('Reward claimed successfully');
-      
-      // Update UI
-      const updatedSubmission = {
-        ...submission!,
-        claimed: true,
-        claimedAt: new Date().toISOString()
-      };
-      setSubmission(updatedSubmission as ISubmission);
-      
-      // Show success message
-      alert('Reward claimed successfully!');
-      
-      // Refresh the page
-      window.location.reload();
-    } catch (error) {
-      console.error('Error claiming reward:', error);
-      setError(`Failed to claim reward: ${(error as Error).message}`);
-    } finally {
-      setProcessingAction(false);
-    }
-  };
-
-  const handlePayAuditor = async () => {
-    if (!isOwner || !submission || !wallet.connected) {
+  const handleClaimBountyReward = async () => {
+    if (!isAuditor || !submission || !wallet.connected) {
       if (!wallet.connected) {
-        alert('Please connect your Solana wallet first to make the payment.');
+        alert('Please connect your Solana wallet first to claim the bounty.');
       }
       return;
     }
     
     if (submission.status !== 'approved') {
-      alert('This submission must be approved before payment can be made.');
+      alert('This submission must be approved before the bounty can be claimed.');
       return;
     }
     
-    // Get the auditor wallet address from multiple sources
+    // Validate that the connected wallet matches the auditor's wallet
     const auditorWalletAddress = 
       submission.auditorWalletAddress || 
       (submission.auditor && typeof submission.auditor === 'object' ? submission.auditor.walletAddress : undefined);
     
     if (!auditorWalletAddress) {
-      alert('No wallet address found for the auditor. Please ensure the auditor has connected their wallet.');
+      alert('No wallet address found for your account. Please contact support.');
       return;
     }
     
-    // Validate the wallet address
-    try {
-      new PublicKey(auditorWalletAddress);
-      console.log(`Valid auditor wallet address: ${auditorWalletAddress}`);
-    } catch (err) {
-      alert(`Invalid auditor wallet address format: ${auditorWalletAddress}`);
+    if (wallet.publicKey && wallet.publicKey.toString() !== auditorWalletAddress) {
+      alert(`Please connect the wallet associated with this submission (${auditorWalletAddress}). Your current wallet (${wallet.publicKey.toString()}) is different.`);
       return;
     }
     
@@ -472,100 +429,101 @@ export default function SubmissionDetailPage() {
     setPaymentResult(null);
     
     try {
-      // Get the exact bounty amount from the bounty data
-      const bountyRef = doc(db, 'bounties', id as string);
-      const bountySnapshot = await getDoc(bountyRef);
-      
-      if (!bountySnapshot.exists()) {
-        throw new Error('Cannot process payment: Bounty not found');
-      }
-      
-      const bountyData = bountySnapshot.data();
-      
-      // Use the exact amount specified when creating the bounty
-      // Try different possible field names for the amount
-      const exactAmount = bountyData.amount || bountyData.bountyAmount || bountyData.prizeAmount;
-      
-      if (!exactAmount) {
-        throw new Error('Cannot process payment: Bounty amount not specified');
-      }
-      
-      console.log(`Using exact bounty amount: ${exactAmount} ${bountyData.tokenMint || 'SOL'}`);
-      
-      // Update the submission with the exact payout amount
-      const submissionRef = doc(db, 'submissions', submissionId as string);
-      await updateDoc(submissionRef, {
-        payoutAmount: exactAmount,
-        updatedAt: Timestamp.now()
+      // Show a processing message
+      setPaymentResult({
+        success: true,
+        message: `Processing claim for bounty...`
       });
       
-      // Update submission object in state
-      submission.payoutAmount = exactAmount;
-      
-      // Release funds from escrow - THIS is the actual on-chain transaction
-      console.log(`Releasing ${exactAmount} SOL from escrow to ${auditorWalletAddress}`);
-      const result = await SolanaService.releasePaymentFromEscrow(
+      // Call the claimBounty function to execute the on-chain transaction
+      console.log(`Claiming bounty with ID: ${id}`);
+      const result = await SolanaService.claimBounty(
         wallet,
-        id as string,
-        auditorWalletAddress,
-        exactAmount
+        id as string
       );
       
       if (result.status === 'success') {
-        console.log('Payment successful:', result);
+        console.log('Claim successful:', result);
+        
+        // Get the bounty document 
+        const bountyRef = doc(db, 'bounties', id as string);
+        const bountySnapshot = await getDoc(bountyRef);
+        
+        if (!bountySnapshot.exists()) {
+          throw new Error(`Bounty ${id} not found`);
+        }
+        
+        const bountyData = bountySnapshot.data();
         
         // Update the submission in Firestore
+        const submissionRef = doc(db, 'submissions', submissionId as string);
         await updateDoc(submissionRef, {
           status: 'approved',
+          claimed: true,
+          claimedAt: Timestamp.now(),
           updatedAt: Timestamp.now(),
-          reviewedAt: Timestamp.now(),
           transactionSignature: result.signature,
           transactionConfirmed: true,
           transactionConfirmedAt: Timestamp.now()
         });
         
-        // Update the bounty with approval
+        // Update the bounty status
         await updateDoc(bountyRef, {
-          approvedCount: (bountyData.approvedCount || 0) + 1,
-          status: 'completed',
+          status: 'claimed',
           updatedAt: Timestamp.now()
         });
         
         // Update UI
         setPaymentResult({
           success: true,
-          message: result.message || `Successfully sent ${exactAmount} SOL to the auditor!`,
+          message: result.message || `Successfully claimed the bounty!`,
           signature: result.signature
         });
         
         // Update the submission state
         const updatedSubmission = {
           ...submission,
-          status: 'approved',
+          claimed: true,
+          claimedAt: new Date().toISOString(),
           transactionSignature: result.signature,
           transactionConfirmed: true
         };
         setSubmission(updatedSubmission as ISubmission);
         
-        // Reload page after delay only if the message doesn't contain timeout
-        if (!result.message?.includes('timed out')) {
-          setTimeout(() => {
-            window.location.reload();
-          }, 3000);
-        }
+        // Reload page after delay
+        setTimeout(() => {
+          window.location.reload();
+        }, 3000);
       } else {
-        console.error('Payment failed:', result);
+        console.error('Claim failed:', result);
+        
+        // Extract the most relevant part of the error message for display
+        let errorMessage = result.message || 'Claim failed. Please try again.';
+        
+        // Check for common error patterns and provide more helpful messages
+        if (errorMessage.includes('Failed to serialize or deserialize account data')) {
+          errorMessage = 'Transaction failed due to account data error. This may be because:\n' +
+            '1. The wallet you\'re using doesn\'t match the one that was approved\n' +
+            '2. The bounty structure has changed\n' +
+            '3. The program has been updated\n\n' +
+            'Please try with the correct wallet or contact support.';
+        } else if (errorMessage.includes('insufficient funds')) {
+          errorMessage = 'Not enough SOL in your wallet to cover the transaction fees. Please add more SOL to your wallet.';
+        } else if (errorMessage.includes('Transaction was not confirmed')) {
+          errorMessage = 'Transaction was sent but not confirmed within the timeout period. It may still complete - check the explorer for status.';
+        }
+        
         setPaymentResult({
           success: false,
-          message: result.message || 'Payment failed. Please try again.'
+          message: errorMessage
         });
       }
     } catch (err) {
-      console.error('Error processing payment:', err);
-      setError(`Payment error: ${(err as Error).message}`);
+      console.error('Error processing claim:', err);
+      setError(`Claim error: ${(err as Error).message}`);
       setPaymentResult({
         success: false,
-        message: `Payment failed: ${(err as Error).message}`
+        message: `Claim failed: ${(err as Error).message}`
       });
     } finally {
       setPaymentProcessing(false);
@@ -784,12 +742,12 @@ export default function SubmissionDetailPage() {
               </div>
             )}
             
-            {isOwner && submission.status === 'approved' && !submission.transactionSignature && (
+            {isAuditor && submission.status === 'approved' && !submission.claimed && !submission.transactionSignature && (
               <div>
                 <div className="flex flex-col space-y-3">
                   {!wallet.connected ? (
                     <div className="bg-yellow-50 border border-yellow-200 rounded-md p-3 mb-3">
-                      <p className="text-sm text-yellow-700 mb-2">You need to connect your Solana wallet to pay the auditor.</p>
+                      <p className="text-sm text-yellow-700 mb-2">You need to connect your Solana wallet to claim the bounty.</p>
                       <div className="flex justify-start">
                         <WalletMultiButton />
                       </div>
@@ -803,7 +761,7 @@ export default function SubmissionDetailPage() {
                       </div>
                       <button
                         type="button"
-                        onClick={handlePayAuditor}
+                        onClick={handleClaimBountyReward}
                         disabled={paymentProcessing}
                         className="inline-flex items-center px-4 py-2 border border-transparent text-sm font-medium rounded-md shadow-sm text-white bg-indigo-600 hover:bg-indigo-700 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-indigo-500"
                       >
@@ -813,10 +771,10 @@ export default function SubmissionDetailPage() {
                               <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4"></circle>
                               <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path>
                             </svg>
-                            Processing Payment...
+                            Processing Claim...
                           </span>
                         ) : (
-                          'Pay Auditor Now'
+                          'Claim Bounty Reward'
                         )}
                       </button>
                     </>
@@ -841,15 +799,22 @@ export default function SubmissionDetailPage() {
               </div>
             )}
             
-            {isAuditor && submission.status === 'approved' && !submission.claimed && (
+            {isOwner && submission.status === 'approved' && !submission.claimed && !submission.transactionSignature && (
+              <div className="bg-blue-50 border border-blue-200 rounded-md p-3">
+                <p className="text-sm text-blue-700">
+                  You've approved this submission. The auditor needs to claim the bounty reward.
+                </p>
+              </div>
+            )}
+            
+            {isAuditor && submission.status === 'approved' && submission.claimed && (
               <div>
                 <button
                   type="button"
-                  onClick={handleClaimReward}
-                  disabled={processingAction}
-                  className="inline-flex items-center px-4 py-2 border border-transparent text-sm font-medium rounded-md shadow-sm text-white bg-indigo-600 hover:bg-indigo-700 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-indigo-500"
+                  disabled={true}
+                  className="inline-flex items-center px-4 py-2 border border-transparent text-sm font-medium rounded-md shadow-sm text-white bg-gray-400 cursor-not-allowed"
                 >
-                  {processingAction ? 'Processing Claim...' : 'Claim Reward'}
+                  Bounty Claimed
                 </button>
               </div>
             )}
@@ -921,7 +886,7 @@ No funds will be transferred until you complete the second step.`}
         <SubmissionVerificationDialog
           isOpen={showClaimDialog}
           onClose={() => setShowClaimDialog(false)}
-          onConfirm={handleClaimReward}
+          onConfirm={handleClaimBountyReward}
           title="Claim Reward"
           description={`You're about to claim a reward of ${submission?.payoutAmount || 0} ${submission?.tokenMint ? 'USDC' : 'SOL'}. The funds will be transferred to your connected wallet.`}
           action="claim"
@@ -931,4 +896,4 @@ No funds will be transferred until you complete the second step.`}
       </div>
     </MainLayout>
   );
-} 
+}
