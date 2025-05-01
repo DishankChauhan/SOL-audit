@@ -25,6 +25,21 @@ impl BountyAccount {
     pub fn is_initialized(&self) -> bool {
         self.initialized
     }
+    
+    // Calculate the space needed for BountyAccount with Borsh serialization overhead
+    pub fn get_account_size() -> usize {
+        // Pubkey: 32 bytes
+        // Option<Pubkey>: 1 + 32 = 33 bytes (discriminant + pubkey)
+        // u64: 8 bytes
+        // i64: 8 bytes
+        // BountyStatus (enum): 1 byte
+        // bool: 1 byte
+        // u8: 1 byte
+        // u8: 1 byte
+        // Total base size: 32 + 33 + 8 + 8 + 1 + 1 + 1 + 1 = 85 bytes
+        // Adding 8 bytes for program-owned account identification + some padding
+        85 + 8 + 15 // = 108 bytes total with some safety padding
+    }
 }
 
 #[derive(BorshSerialize, BorshDeserialize, Clone, Debug, PartialEq)]

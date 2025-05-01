@@ -9,11 +9,11 @@ if (typeof window === 'undefined') {
 // Export environment variables with proper fallbacks
 export const ENV = {
   // For local development
-  LOCAL_PROGRAM_ID: 'Gd2hEeEPdvPN7bPdbkthPZHxsaRNTJWxcpp2pwRWBw4R',
+  LOCAL_PROGRAM_ID: '3K6VQ96CqESYiVT5kqPy6BU7ZDQbkZhVU4K5Bas7r9eh',
   // Original devnet program ID
   DEVNET_PROGRAM_ID: '3K6VQ96CqESYiVT5kqPy6BU7ZDQbkZhVU4K5Bas7r9eh',
   // Use local program ID when in development/localhost mode, otherwise use devnet
-  PROGRAM_ID: 'Gd2hEeEPdvPN7bPdbkthPZHxsaRNTJWxcpp2pwRWBw4R',
+  PROGRAM_ID: '3K6VQ96CqESYiVT5kqPy6BU7ZDQbkZhVU4K5Bas7r9eh',
   SOLANA_RPC_URL: 'http://127.0.0.1:8899',
   SOLANA_NETWORK: 'localnet',
   USDC_MINT: process.env.NEXT_PUBLIC_USDC_MINT || '4zMMC9srt5Ri5X14GAgXhaHii3GnPAEERYPJgZJDncDU',

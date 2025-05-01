@@ -13,7 +13,7 @@ interface IBounty {
   title: string;
   description: string;
   repoUrl: string;
-  status: 'open' | 'closed' | 'cancelled' | 'draft' | 'cancelling' | 'completing' | 'completed';
+  status: 'open' | 'closed' | 'cancelled' | 'draft' | 'cancelling' | 'completing' | 'completed' | 'Active';
   owner: string;
   ownerName: string;
 }
@@ -102,7 +102,7 @@ export default function SubmitFindingPage() {
         };
         
         // Check if the bounty is in open status
-        if (bountyData.status !== 'open') {
+        if (bountyData.status !== 'open' && bountyData.status !== 'Active') {
           const statusError = `This bounty is currently ${bountyData.status} and not accepting submissions`;
           setError(statusError);
           setLoading(false);
@@ -326,7 +326,7 @@ export default function SubmitFindingPage() {
     );
   }
 
-  if (bounty.status !== 'open') {
+  if (bounty.status !== 'open' && bounty.status !== 'Active') {
     return (
       <MainLayout>
         <div className="max-w-4xl mx-auto px-4 sm:px-6 lg:px-8 py-8">

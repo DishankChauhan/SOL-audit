@@ -1,10 +1,10 @@
 import { NextRequest, NextResponse } from "next/server";
 import { Connection, PublicKey, Transaction, SystemProgram, TransactionInstruction } from "@solana/web3.js";
 import { Buffer } from 'buffer';
-import { serializeCreateBountyInstruction } from "@/lib/solana/borsh";
+import { serializeCreateBountyInstruction, estimateBountyAccountSize } from "@/lib/solana/borsh";
 
 // Program ID for the Solana contract
-const PROGRAM_ID = new PublicKey("Gd2hEeEPdvPN7bPdbkthPZHxsaRNTJWxcpp2pwRWBw4R");
+const PROGRAM_ID = new PublicKey("3K6VQ96CqESYiVT5kqPy6BU7ZDQbkZhVU4K5Bas7r9eh");
 
 export async function POST(req: NextRequest) {
   try {
@@ -38,6 +38,10 @@ export async function POST(req: NextRequest) {
     const customSeed = new TextEncoder().encode(seed);
     
     console.log("Using custom seed for bounty:", seed);
+
+    // Estimate account size (for debugging)
+    const estimatedSize = estimateBountyAccountSize();
+    console.log(`[DEBUG] Estimated account size needed: ${estimatedSize} bytes`);
 
     // Setup Solana connection
     const rpcUrl = process.env.NEXT_PUBLIC_SOLANA_RPC_URL || 'http://127.0.0.1:8899';

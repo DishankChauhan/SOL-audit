@@ -79,4 +79,46 @@ export function serializeCreateBountyInstruction(
   
   // Return only the used part of the buffer
   return buffer.slice(0, offset);
+}
+
+/**
+ * Debugging function to estimate account size requirements for BountyAccount
+ * 
+ * This helps confirm the frontend's understanding of Borsh serialization
+ * matches what's needed in the Rust program.
+ */
+export function estimateBountyAccountSize(): number {
+  // Base size for Borsh serialization overhead (8 bytes anchor discriminator)
+  let size = 8;
+  
+  // Pubkey (creator): 32 bytes
+  size += 32;
+  
+  // Option<Pubkey> (hunter): 1 byte discriminator + 32 bytes pubkey
+  size += 1 + 32;
+  
+  // u64 (amount): 8 bytes
+  size += 8;
+  
+  // i64 (deadline): 8 bytes
+  size += 8;
+  
+  // BountyStatus enum: 1 byte
+  size += 1;
+  
+  // bool (initialized): 1 byte
+  size += 1;
+  
+  // u8 (winners_count): 1 byte
+  size += 1;
+  
+  // u8 (current_winners): 1 byte
+  size += 1;
+  
+  // Add extra padding for safety
+  size += 16;
+  
+  console.log(`Estimated BountyAccount size: ${size} bytes`);
+  
+  return size;
 } 

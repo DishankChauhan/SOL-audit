@@ -21,7 +21,7 @@ interface IBounty {
   description: string;
   repoUrl: string;
   bountyAmount: number;
-  status: 'open' | 'closed' | 'cancelled' | 'draft' | 'cancelling' | 'completing' | 'completed';
+  status: 'open' | 'closed' | 'cancelled' | 'draft' | 'cancelling' | 'completing' | 'completed' | 'Active';
   submissionsCount: number;
   approvedCount: number;
   owner: string; // Firebase user ID
@@ -39,6 +39,7 @@ interface IBounty {
   solanaAddress?: string;
   judgingCriteria?: string;
   transactionHash?: string;
+  creatorWallet?: string;
 }
 
 interface ISubmission {
@@ -132,7 +133,8 @@ export default function BountyDetailPage() {
           },
           solanaAddress: data.solanaAddress,
           judgingCriteria: data.judgingCriteria,
-          transactionHash: data.transactionHash
+          transactionHash: data.transactionHash,
+          creatorWallet: data.creatorWallet
         };
         
         setBounty(bountyData);
@@ -189,7 +191,10 @@ export default function BountyDetailPage() {
   }, [id]);
 
   // Check if the current user is the owner of the bounty
-  const isOwner = bounty && user && String(bounty.owner) === String(user.uid);
+  const isOwner = bounty && user && (
+    String(bounty.owner) === String(user.uid) || 
+    (bounty.creatorWallet && String(bounty.creatorWallet) === String(user.uid))
+  );
   
   // Add additional debugging to diagnose ownership issues
   useEffect(() => {
@@ -309,6 +314,11 @@ export default function BountyDetailPage() {
       bg: 'bg-green-100',
       text: 'text-green-800',
       label: 'Completed'
+    },
+    Active: {
+      bg: 'bg-green-100',
+      text: 'text-green-800',
+      label: 'Active'
     }
   };
 
@@ -433,6 +443,27 @@ export default function BountyDetailPage() {
     }
   };
 
+  // Function to manually fix ownership
+  const fixOwnershipManually = async () => {
+    if (!bounty || !user) return;
+    
+    try {
+      const bountyRef = doc(db, 'bounties', bounty.id);
+      await updateDoc(bountyRef, {
+        owner: user.uid,
+        ownerName: user.displayName || 'Anonymous',
+        updatedAt: Timestamp.now()
+      });
+      
+      console.log("Ownership manually fixed for bounty:", bounty.id);
+      alert("Ownership updated successfully. Reloading page...");
+      window.location.reload();
+    } catch (error) {
+      console.error("Error fixing ownership:", error);
+      alert("Failed to update ownership. See console for details.");
+    }
+  };
+
   if (loading) {
     return (
       <MainLayout>
@@ -460,6 +491,13 @@ export default function BountyDetailPage() {
                 className="inline-flex items-center px-4 py-2 border border-transparent text-sm font-medium rounded-md shadow-sm text-white bg-indigo-600 hover:bg-indigo-700 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-indigo-500"
               >
                 Back to Bounties
+            </Link>
+            {/* Always show Submit button */}
+            <Link
+              href={`/bounty/${bounty?.id}/submit`}
+              className="ml-3 inline-flex items-center px-4 py-2 border border-transparent rounded-md shadow-sm text-sm font-medium text-white bg-purple-600 hover:bg-purple-700 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-purple-500"
+            >
+              Submit Finding
               </Link>
             </div>
           </div>
@@ -471,6 +509,28 @@ export default function BountyDetailPage() {
   return (
     <MainLayout>
       <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-8">
+        {/* Debug panel */}
+        <div className="mb-6 p-4 bg-gray-800 text-white text-xs font-mono rounded">
+          <h3 className="font-bold mb-2">Debug Info</h3>
+          <div>User authenticated: {user ? 'Yes' : 'No'}</div>
+          <div>User ID: {user?.uid || 'Not logged in'}</div>
+          <div>Bounty status: {bounty?.status || 'Unknown'}</div>
+          <div>isOwner check: {isOwner ? 'true (You own this bounty)' : 'false (Not your bounty)'}</div>
+          <div>Submit button should show: {(bounty?.status === 'open' || bounty?.status === 'Active') && !isOwner && user ? 'YES' : 'NO'}</div>
+          <div>Owner information: {bounty?.owner || 'No owner ID'}</div>
+          <div>Creator wallet: {bounty?.creatorWallet || 'Not set'}</div>
+          
+          {/* Add manual fix button */}
+          {user && bounty && !isOwner && (
+            <button 
+              onClick={fixOwnershipManually}
+              className="mt-2 bg-red-600 text-white px-2 py-1 rounded text-xs"
+            >
+              Fix Ownership (Emergency)
+            </button>
+          )}
+        </div>
+        
         <div className="md:flex md:items-center md:justify-between mb-6">
           <div className="flex-1 min-w-0">
             <h2 className="text-2xl font-bold leading-7 text-white sm:text-3xl sm:truncate">
@@ -503,6 +563,13 @@ export default function BountyDetailPage() {
             >
               Back to Bounties
             </Link>
+            {/* Always show Submit button */}
+            <Link
+              href={`/bounty/${bounty?.id}/submit`}
+              className="ml-3 inline-flex items-center px-4 py-2 border border-transparent rounded-md shadow-sm text-sm font-medium text-white bg-purple-600 hover:bg-purple-700 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-purple-500"
+            >
+              Submit Finding
+            </Link>
             {isOwner && bounty.status === 'draft' && (
               <button
                 className="ml-3 inline-flex items-center px-4 py-2 border border-transparent rounded-md shadow-sm text-sm font-medium text-white bg-green-600 hover:bg-green-700 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-green-500"
@@ -512,10 +579,19 @@ export default function BountyDetailPage() {
                 {publishing ? 'Publishing...' : 'Publish Bounty'}
               </button>
             )}
-            {bounty.status === 'open' && !isOwner && user && (
+            {(bounty.status === 'open' || bounty.status === 'Active') && !isOwner && user && (
               <Link
-                href={`/bounty/${bounty.id}/submit`}
+                href={`/bounty/${bounty?.id}/submit`}
                 className="ml-3 inline-flex items-center px-4 py-2 border border-transparent rounded-md shadow-sm text-sm font-medium text-white bg-indigo-600 hover:bg-indigo-700 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-indigo-500"
+              >
+                Submit Finding
+              </Link>
+            )}
+            {/* Submit button - always visible for all users */}
+            {user && (bounty.status === 'open' || bounty.status === 'Active') && (
+              <Link
+                href={`/bounty/${bounty?.id}/submit`}
+                className="ml-3 inline-flex items-center px-4 py-2 border border-transparent rounded-md shadow-sm text-sm font-medium text-white bg-purple-600 hover:bg-purple-700 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-purple-500"
               >
                 Submit Finding
               </Link>
@@ -571,10 +647,10 @@ export default function BountyDetailPage() {
                   </div>
                   
                   {/* Submit Finding Button for Auditors */}
-                  {user && !isOwner && bounty.status === 'open' && (
+                  {user && !isOwner && (bounty.status === 'open' || bounty.status === 'Active') && (
                     <div className="mt-4">
                       <Link
-                        href={`/bounty/${bounty.id}/submit`}
+                        href={`/bounty/${bounty?.id}/submit`}
                         className="inline-flex items-center px-6 py-3 border border-transparent text-base font-medium rounded-md shadow-sm text-white bg-green-600 hover:bg-green-700 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-green-500"
                       >
                         <svg xmlns="http://www.w3.org/2000/svg" className="h-5 w-5 mr-2" viewBox="0 0 20 20" fill="currentColor">
@@ -716,10 +792,10 @@ export default function BountyDetailPage() {
                   </div>
                   
                   {/* Submit findings button - only for non-owners when bounty is open */}
-                  {user && bounty.status === 'open' && user.uid !== bounty.owner && (
+                  {user && !isOwner && (bounty.status === 'open' || bounty.status === 'Active') && (
                     <div className="mt-4">
                       <Link
-                        href={`/bounty/${bounty.id}/submit`}
+                        href={`/bounty/${bounty?.id}/submit`}
                         className="inline-flex items-center justify-center rounded-md bg-blue-600 px-3 py-2 text-sm font-semibold text-white shadow-sm hover:bg-blue-500 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-blue-600"
                       >
                         Submit Finding
@@ -735,7 +811,7 @@ export default function BountyDetailPage() {
                       Login or create an account to submit findings for this bounty
                     </p>
                     <Link
-                      href={`/login?redirect=/bounty/${bounty.id}`}
+                      href={`/login?redirect=/bounty/${bounty?.id}`}
                       className="inline-flex items-center justify-center rounded-md bg-blue-600 px-3 py-2 text-sm font-semibold text-white shadow-sm hover:bg-blue-500 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-blue-600"
                     >
                       Login
@@ -754,21 +830,21 @@ export default function BountyDetailPage() {
                   <p className="mt-2 text-gray-500">
                     {isOwner ? 'No one has submitted any findings yet.' : 'Be the first to submit a finding!'}
                   </p>
-                  {!isOwner && user && bounty.status === 'open' && (
+                  {!isOwner && user && (bounty.status === 'open' || bounty.status === 'Active') && (
                     <div className="mt-6">
                       <Link
-                        href={`/bounty/${bounty.id}/submit`}
+                        href={`/bounty/${bounty?.id}/submit`}
                         className="inline-flex items-center px-4 py-2 border border-transparent text-sm font-medium rounded-md shadow-sm text-white bg-indigo-600 hover:bg-indigo-700 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-indigo-500"
                       >
                         Submit Finding
                       </Link>
                     </div>
                   )}
-                  {!user && !isOwner && bounty.status === 'open' && (
+                  {!user && !isOwner && (bounty.status === 'open' || bounty.status === 'Active') && (
                     <div className="mt-6 border border-indigo-100 rounded-lg p-4 bg-indigo-50">
                       <p className="mb-3 text-sm text-indigo-600">Login or create an account to submit findings for this bounty</p>
                       <Link
-                        href={`/login?redirect=/bounty/${bounty.id}`}
+                        href={`/login?redirect=/bounty/${bounty?.id}`}
                         className="inline-flex items-center px-4 py-2 border border-transparent text-sm font-medium rounded-md shadow-sm text-white bg-indigo-600 hover:bg-indigo-700 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-indigo-500"
                       >
                         Log In / Sign Up
@@ -833,7 +909,7 @@ export default function BountyDetailPage() {
                               </button>
                             )}
                             <Link 
-                              href={`/bounty/${bounty.id}/submission/${submission.id}`}
+                              href={`/bounty/${bounty?.id}/submission/${submission.id}`}
                               className="inline-flex items-center px-2 py-1 border border-transparent text-xs font-medium rounded text-indigo-700 bg-indigo-100 hover:bg-indigo-200 focus:outline-none focus:ring-1 focus:ring-offset-1 focus:ring-indigo-500 ml-2"
                             >
                               View

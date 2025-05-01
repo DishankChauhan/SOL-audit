@@ -16,7 +16,7 @@ import { sendSignedTransactionToLocalnet } from '@/lib/solana/local-sender';
 import { debugTransactionInstruction } from '@/lib/solana/debug-utils';
 
 // Hard-coded program ID for reference
-const PROGRAM_ID = "Gd2hEeEPdvPN7bPdbkthPZHxsaRNTJWxcpp2pwRWBw4R";
+const PROGRAM_ID = "3K6VQ96CqESYiVT5kqPy6BU7ZDQbkZhVU4K5Bas7r9eh";
 
 type FormData = {
   title: string;
@@ -367,6 +367,9 @@ export default function CreateBountyPage() {
               ...metadata,
               createdBy: user.uid,
               creatorName: user.displayName || 'Anonymous',
+              owner: user.uid,
+              ownerName: user.displayName || 'Anonymous',
+              ownerWallet: wallet.publicKey?.toString(),
               status: 'active',
               transactionSignature: sendData.signature
             }
