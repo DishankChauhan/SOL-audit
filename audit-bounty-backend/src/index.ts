@@ -11,10 +11,13 @@ app.use(helmet()); // Security headers
 app.use(cors()); // Enable CORS
 app.use(express.json()); // Parse JSON
 
-// Get configuration from Firebase Functions config
+// Get configuration from Firebase Functions config or environment variables
 const config = functions.config();
-const PROGRAM_ID = config?.solana?.program_id || '5Bb4BGBkViCPnyRcSevAggmLXNLTCHTR27yzLkjCRdJY';
-const RPC_URL = config?.solana?.rpc_url || 'https://api.devnet.solana.com';
+
+// Load environment variables
+const PORT = process.env.PORT || 3001;
+const SOLANA_RPC_URL = config?.solana?.rpc_url || process.env.SOLANA_RPC_URL || 'https://api.devnet.solana.com';
+const PROGRAM_ID = config?.solana?.program_id || 'Gd2hEeEPdvPN7bPdbkthPZHxsaRNTJWxcpp2pwRWBw4R';
 
 // Main API endpoint
 app.get('/', (req, res) => {
@@ -30,7 +33,7 @@ app.get('/contract', (req, res) => {
   res.status(200).json({
     programId: PROGRAM_ID,
     network: 'devnet',
-    rpcUrl: RPC_URL,
+    rpcUrl: SOLANA_RPC_URL,
     explorer: `https://explorer.solana.com/address/${PROGRAM_ID}?cluster=devnet`
   });
 });

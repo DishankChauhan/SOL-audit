@@ -9,7 +9,7 @@ import { formatDistanceToNow } from 'date-fns';
 import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
 import remarkBreaks from 'remark-breaks';
-import { Bounty } from '@/services/bounty';
+import { BountyService } from '@/services/bounty';
 import { doc, updateDoc, Timestamp } from 'firebase/firestore';
 import { db } from '@/lib/firebase/config';
 
@@ -113,8 +113,16 @@ export default function BountyDetailPage() {
           owner: data.owner || '',
           ownerName: data.ownerName || 'Unknown',
           ownerPhotoURL: data.ownerPhotoURL,
-          deadline: data.deadline ? new Date(data.deadline.toDate()).toISOString() : new Date().toISOString(),
-          createdAt: data.createdAt ? new Date(data.createdAt.toDate()).toISOString() : new Date().toISOString(),
+          deadline: data.deadline 
+            ? (typeof data.deadline === 'object' && data.deadline.toDate 
+                ? new Date(data.deadline.toDate()).toISOString() 
+                : new Date(data.deadline).toISOString())
+            : new Date().toISOString(),
+          createdAt: data.createdAt 
+            ? (typeof data.createdAt === 'object' && data.createdAt.toDate
+                ? new Date(data.createdAt.toDate()).toISOString()
+                : new Date(data.createdAt).toISOString())
+            : new Date().toISOString(),
           tags: data.tags || [],
           severityWeights: data.severityWeights || {
             critical: 50,
@@ -152,7 +160,11 @@ export default function BountyDetailPage() {
                 displayName: data.auditorName || 'Anonymous',
                 photoURL: `https://api.dicebear.com/7.x/avataaars/svg?seed=${data.auditorId}`
               },
-              createdAt: data.createdAt ? new Date(data.createdAt.toDate()).toISOString() : new Date().toISOString(),
+              createdAt: data.createdAt 
+                ? (typeof data.createdAt === 'object' && data.createdAt.toDate
+                    ? new Date(data.createdAt.toDate()).toISOString()
+                    : new Date(data.createdAt).toISOString())
+                : new Date().toISOString(),
               pocUrl: data.pocUrl,
               fixUrl: data.fixUrl
             };
@@ -177,7 +189,28 @@ export default function BountyDetailPage() {
   }, [id]);
 
   // Check if the current user is the owner of the bounty
-  const isOwner = bounty && user && bounty.owner === user.uid;
+  const isOwner = bounty && user && String(bounty.owner) === String(user.uid);
+  
+  // Add additional debugging to diagnose ownership issues
+  useEffect(() => {
+    if (bounty && user) {
+      console.log('=== DETAILED OWNERSHIP DEBUG ===');
+      console.log('Bounty owner:', bounty.owner);
+      console.log('User ID:', user.uid);
+      console.log('Direct comparison (===):', String(bounty.owner) === String(user.uid));
+      console.log('Types:', {
+        bountyOwnerType: typeof bounty.owner,
+        userIdType: typeof user.uid
+      });
+      console.log('String values for comparison:', {
+        bountyOwnerString: String(bounty.owner),
+        userIdString: String(user.uid)
+      });
+      console.log('String comparison:', String(bounty.owner) === String(user.uid));
+      console.log('isOwner evaluation result:', isOwner);
+      console.log('===========================');
+    }
+  }, [bounty, user, isOwner]);
   
   // Fix ownership if needed (either first time access or data migration)
   useEffect(() => {
@@ -334,7 +367,7 @@ export default function BountyDetailPage() {
     
     try {
       setPublishing(true);
-      await Bounty.updateStatus(bounty.id, 'open');
+      await BountyService.updateStatus(bounty.id, 'open');
       
       // Refresh the page to show the updated status
       window.location.reload();
@@ -355,6 +388,14 @@ export default function BountyDetailPage() {
       bountyOwner: bounty?.owner,
       userMatch: bounty?.owner === user?.uid
     });
+    
+    // Add safety check to prevent non-owners from approving submissions
+    if (!isOwner) {
+      console.error("Cannot approve: User is not the bounty owner");
+      alert("Only the bounty owner can approve submissions");
+      return;
+    }
+    
     if (!bounty?.id) {
       console.error("Cannot approve: Bounty ID is missing");
       return;
@@ -368,7 +409,7 @@ export default function BountyDetailPage() {
       setProcessing(submissionId);
       
       // Call the Bounty class method to approve the submission
-      await Bounty.approveSubmission(bounty.id, submissionId);
+      await BountyService.approveSubmission(bounty.id, submissionId);
       
       // Show success message
       alert("Submission approved successfully!");
@@ -471,7 +512,7 @@ export default function BountyDetailPage() {
                 {publishing ? 'Publishing...' : 'Publish Bounty'}
               </button>
             )}
-            {user && !isOwner && bounty.status === 'open' && (
+            {bounty.status === 'open' && !isOwner && user && (
               <Link
                 href={`/bounty/${bounty.id}/submit`}
                 className="ml-3 inline-flex items-center px-4 py-2 border border-transparent rounded-md shadow-sm text-sm font-medium text-white bg-indigo-600 hover:bg-indigo-700 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-indigo-500"
@@ -674,19 +715,33 @@ export default function BountyDetailPage() {
                     </ReactMarkdown>
                   </div>
                   
-                  {/* Alternative Submit Finding Button */}
-                  {user && !isOwner && bounty.status === 'open' && (
-                    <div className="mt-6 text-center">
-                      <p className="mb-3 text-sm text-gray-600">Ready to submit your security finding?</p>
+                  {/* Submit findings button - only for non-owners when bounty is open */}
+                  {user && bounty.status === 'open' && user.uid !== bounty.owner && (
+                    <div className="mt-4">
                       <Link
                         href={`/bounty/${bounty.id}/submit`}
-                        className="inline-flex items-center justify-center px-5 py-2 border border-green-500 text-base font-medium rounded-md text-green-700 bg-white hover:bg-green-50 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-green-500"
+                        className="inline-flex items-center justify-center rounded-md bg-blue-600 px-3 py-2 text-sm font-semibold text-white shadow-sm hover:bg-blue-500 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-blue-600"
                       >
-                        Submit Finding Now
+                        Submit Finding
                       </Link>
                     </div>
                   )}
                 </div>
+
+                {/* Login prompt for unauthenticated users */}
+                {!user && bounty.status === 'open' && (
+                  <div className="mt-4 p-4 border border-gray-200 rounded-md bg-gray-50">
+                    <p className="text-sm text-gray-700 mb-2">
+                      Login or create an account to submit findings for this bounty
+                    </p>
+                    <Link
+                      href={`/login?redirect=/bounty/${bounty.id}`}
+                      className="inline-flex items-center justify-center rounded-md bg-blue-600 px-3 py-2 text-sm font-semibold text-white shadow-sm hover:bg-blue-500 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-blue-600"
+                    >
+                      Login
+                    </Link>
+                  </div>
+                )}
               </div>
             </div>
           )}
@@ -699,13 +754,24 @@ export default function BountyDetailPage() {
                   <p className="mt-2 text-gray-500">
                     {isOwner ? 'No one has submitted any findings yet.' : 'Be the first to submit a finding!'}
                   </p>
-                  {!isOwner && bounty.status === 'open' && (
+                  {!isOwner && user && bounty.status === 'open' && (
                     <div className="mt-6">
                       <Link
                         href={`/bounty/${bounty.id}/submit`}
                         className="inline-flex items-center px-4 py-2 border border-transparent text-sm font-medium rounded-md shadow-sm text-white bg-indigo-600 hover:bg-indigo-700 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-indigo-500"
                       >
                         Submit Finding
+                      </Link>
+                    </div>
+                  )}
+                  {!user && !isOwner && bounty.status === 'open' && (
+                    <div className="mt-6 border border-indigo-100 rounded-lg p-4 bg-indigo-50">
+                      <p className="mb-3 text-sm text-indigo-600">Login or create an account to submit findings for this bounty</p>
+                      <Link
+                        href={`/login?redirect=/bounty/${bounty.id}`}
+                        className="inline-flex items-center px-4 py-2 border border-transparent text-sm font-medium rounded-md shadow-sm text-white bg-indigo-600 hover:bg-indigo-700 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-indigo-500"
+                      >
+                        Log In / Sign Up
                       </Link>
                     </div>
                   )}
@@ -747,37 +813,31 @@ export default function BountyDetailPage() {
                             </div>
                           </td>
                           <td className="whitespace-nowrap px-3 py-4 text-sm text-gray-500">
-                            <span className={`px-2 inline-flex text-xs leading-5 font-semibold rounded-full ${severityColors[submission.severity].bg} ${severityColors[submission.severity].text}`}>
-                              {severityColors[submission.severity].label}
+                            <span className={`px-2 inline-flex text-xs leading-5 font-semibold rounded-full ${severityColors[submission.severity]?.bg || 'bg-gray-100'} ${severityColors[submission.severity]?.text || 'text-gray-800'}`}>
+                              {severityColors[submission.severity]?.label || submission.severity}
                             </span>
                           </td>
                           <td className="whitespace-nowrap px-3 py-4 text-sm text-gray-500">
-                            {submission.status === 'approved' ? (
-                              <Link href={`/bounty/${bounty.id}/submission/${submission.id}`} className="text-indigo-600 hover:text-indigo-900">
-                                Review
-                              </Link>
-                            ) : (
-                              console.log('Submission approval check:', { 
-                                submissionId: submission.id,
-                                isOwner, 
-                                currentUserId: user?.uid,
-                                bountyOwnerId: bounty?.owner,
-                                status: submission.status,
-                                ownershipMatch: user?.uid === bounty?.owner,
-                                buttonVisible: isOwner && submission.status === 'pending'
-                              }),
-                              isOwner && submission.status === 'pending' && (
-                                <>
-                                  <button
-                                    onClick={() => handleApproveSubmission(submission.id)}
-                                    className="text-green-600 hover:text-green-900 mr-2"
-                                    disabled={processing === submission.id}
-                                  >
-                                    {processing === submission.id ? 'Processing...' : 'Approve'}
-                                  </button>
-                                </>
-                              )
+                            <span className={`px-2 inline-flex text-xs leading-5 font-semibold rounded-full ${submissionStatusColors[submission.status]?.bg || 'bg-gray-100'} ${submissionStatusColors[submission.status]?.text || 'text-gray-800'}`}>
+                              {submissionStatusColors[submission.status]?.label || submission.status}
+                            </span>
+                          </td>
+                          <td className="whitespace-nowrap px-3 py-4 text-sm text-gray-500">
+                            {isOwner && submission.status === 'pending' && (
+                              <button
+                                onClick={() => handleApproveSubmission(submission.id)}
+                                className="inline-flex items-center px-2 py-1 border border-transparent text-xs font-medium rounded text-white bg-green-600 hover:bg-green-700 focus:outline-none focus:ring-1 focus:ring-offset-1 focus:ring-green-500"
+                                disabled={processing === submission.id}
+                              >
+                                {processing === submission.id ? 'Processing...' : 'Approve'}
+                              </button>
                             )}
+                            <Link 
+                              href={`/bounty/${bounty.id}/submission/${submission.id}`}
+                              className="inline-flex items-center px-2 py-1 border border-transparent text-xs font-medium rounded text-indigo-700 bg-indigo-100 hover:bg-indigo-200 focus:outline-none focus:ring-1 focus:ring-offset-1 focus:ring-indigo-500 ml-2"
+                            >
+                              View
+                            </Link>
                           </td>
                         </tr>
                       ))}

@@ -8,7 +8,7 @@ const config = functions.config();
 
 // Load environment variables
 const SOLANA_RPC_URL = config?.solana?.rpc_url || process.env.SOLANA_RPC_URL || 'https://api.devnet.solana.com';
-const PROGRAM_ID = config?.solana?.program_id || process.env.PROGRAM_ID || '5Bb4BGBkViCPnyRcSevAggmLXNLTCHTR27yzLkjCRdJY';
+const PROGRAM_ID = config?.solana?.program_id || process.env.PROGRAM_ID || 'Gd2hEeEPdvPN7bPdbkthPZHxsaRNTJWxcpp2pwRWBw4R';
 const SOLANA_KEYPAIR_PATH = process.env.SOLANA_KEYPAIR_PATH || path.join(__dirname, '../../keypair.json');
 
 // Initialize Solana connection

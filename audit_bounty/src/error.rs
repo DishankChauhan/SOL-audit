@@ -35,6 +35,33 @@ pub enum BountyError {
 
     #[error("Failed to transfer SOL")]
     TransferFailed,
+    
+    #[error("Submission not found")]
+    SubmissionNotFound,
+    
+    #[error("Invalid submission")]
+    InvalidSubmission,
+    
+    #[error("Submission already approved")]
+    SubmissionAlreadyApproved,
+
+    #[error("Already voted")]
+    AlreadyVoted,
+
+    #[error("Invalid vote type")]
+    InvalidVoteType,
+
+    #[error("Invalid severity")]
+    InvalidSeverity,
+
+    #[error("Maximum winners reached")]
+    MaxWinnersReached,
+
+    #[error("Payout amount exceeds limit")]
+    PayoutExceedsLimit,
+
+    #[error("Submission already selected as winner")]
+    SubmissionAlreadyWinner,
 }
 
 impl From<BountyError> for ProgramError {

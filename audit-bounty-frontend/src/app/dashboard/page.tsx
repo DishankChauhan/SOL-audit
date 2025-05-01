@@ -225,8 +225,8 @@ export default function DashboardPage() {
                   ))}
                   {userBounties.length >= 5 && (
                     <div className="text-center mt-4">
-                      <Button asChild variant="outline">
-                        <Link href="/bounty/my">View All Bounties</Link>
+                      <Button asChild>
+                        <Link href="/bounty/my" className="btn-outline">View All Bounties</Link>
                       </Button>
                     </div>
                   )}
@@ -255,8 +255,8 @@ export default function DashboardPage() {
                   ))}
                   {userSubmissions.length >= 5 && (
                     <div className="text-center mt-4">
-                      <Button asChild variant="outline">
-                        <Link href="/submission/my">View All Submissions</Link>
+                      <Button asChild>
+                        <Link href="/submission/my" className="btn-outline">View All Submissions</Link>
                       </Button>
                     </div>
                   )}

@@ -14,10 +14,8 @@ interface IBounty {
   description: string;
   repoUrl: string;
   status: 'open' | 'closed' | 'cancelled' | 'draft' | 'cancelling' | 'completing' | 'completed';
-  owner: {
-    id: string;
-    displayName: string;
-  };
+  owner: string;
+  ownerName: string;
 }
 
 export default function SubmitFindingPage() {
@@ -75,22 +73,47 @@ export default function SubmitFindingPage() {
           return;
         }
         
+        // Get the full bounty data for better debugging
         const data = bountySnapshot.data();
+        console.log("DEBUG - Full bounty data:", data);
+        console.log("DEBUG - Current user:", user?.uid);
+        
+        // Get owner directly from the data
+        const bountyOwnerId = data.owner;
+        const currentUserId = user?.uid;
+        
+        // Check if current user is the owner
+        const isOwner = bountyOwnerId === currentUserId;
+        
+        console.log("DEBUG - Ownership check:", {
+          bountyOwnerId,
+          currentUserId,
+          isOwner
+        });
+        
         const bountyData: IBounty = {
           id: bountySnapshot.id,
           title: data.title || '',
           description: data.description || '',
           repoUrl: data.repoUrl || '',
           status: data.status || 'open',
-          owner: {
-            id: data.owner || '',
-            displayName: data.ownerName || 'Unknown'
-          }
+          owner: bountyOwnerId || '',
+          ownerName: data.ownerName || 'Unknown'
         };
         
+        // Check if the bounty is in open status
+        if (bountyData.status !== 'open') {
+          const statusError = `This bounty is currently ${bountyData.status} and not accepting submissions`;
+          setError(statusError);
+          setLoading(false);
+          return;
+        }
+        
         // Check if user is the owner (owners can't submit to their own bounties)
-        if (bountyData.owner.id === user?.uid) {
-          setError("You can't submit findings for your own bounty");
+        if (isOwner) {
+          const ownerError = "You can't submit findings for your own bounty";
+          console.error(ownerError);
+          setError(ownerError);
           setLoading(false);
           return;
         }
@@ -264,16 +287,38 @@ export default function SubmitFindingPage() {
     return (
       <MainLayout>
         <div className="max-w-4xl mx-auto px-4 sm:px-6 lg:px-8 py-8">
-          <div className="text-center py-12">
-            <h2 className="text-2xl font-bold text-white">Error Loading Bounty</h2>
-            <p className="mt-2 text-gray-400">{error || 'Bounty not found'}</p>
-            <div className="mt-6">
-              <Link
-                href="/bounties"
-                className="inline-flex items-center px-4 py-2 border border-transparent text-sm font-medium rounded-md shadow-sm text-white bg-indigo-600 hover:bg-indigo-700 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-indigo-500"
-              >
-                Back to Bounties
-              </Link>
+          <div className="text-center py-12 bg-white shadow overflow-hidden sm:rounded-lg">
+            <div className="px-4 py-5 sm:p-6">
+              <svg className="mx-auto h-12 w-12 text-red-400" fill="none" stroke="currentColor" viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg">
+                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 8v4m0 4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z" />
+              </svg>
+              <h2 className="mt-4 text-2xl font-bold text-gray-900">Cannot Submit Finding</h2>
+              <p className="mt-2 text-gray-600">{error || 'Bounty not found'}</p>
+              
+              {/* Debug information */}
+              <div className="mt-4 p-4 bg-gray-100 text-xs text-left rounded overflow-auto max-h-40">
+                <pre>
+                  Debug Info:
+                  - Bounty ID: {id}
+                  - Current User: {user?.uid || 'Not authenticated'}
+                  - Error: {error}
+                </pre>
+              </div>
+              
+              <div className="mt-6">
+                <Link
+                  href={`/bounty/${id}`}
+                  className="inline-flex items-center px-4 py-2 border border-transparent text-sm font-medium rounded-md shadow-sm text-white bg-indigo-600 hover:bg-indigo-700 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-indigo-500 mr-3"
+                >
+                  Back to Bounty
+                </Link>
+                <Link
+                  href="/bounties"
+                  className="inline-flex items-center px-4 py-2 border border-gray-300 rounded-md shadow-sm text-sm font-medium text-gray-700 bg-white hover:bg-gray-50 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-indigo-500"
+                >
+                  Browse All Bounties
+                </Link>
+              </div>
             </div>
           </div>
         </div>
@@ -311,7 +356,7 @@ export default function SubmitFindingPage() {
               Submit Finding
             </h2>
             <p className="mt-1 text-sm text-gray-400">
-              For bounty: <span className="font-medium">{bounty.title}</span>
+              For bounty: <span className="font-medium">{bounty.title}</span> by <span className="font-medium">{bounty.ownerName}</span>
             </p>
           </div>
           <div className="mt-4 flex md:mt-0 md:ml-4">

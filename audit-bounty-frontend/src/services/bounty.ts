@@ -1,422 +1,301 @@
-import { PublicKey } from '@solana/web3.js';
-import { BountyStatus, SolanaService } from './solana';
-import { addDoc, collection, deleteDoc, doc, getDoc, getDocs, query, setDoc, updateDoc, where } from 'firebase/firestore';
+import { Connection, PublicKey } from '@solana/web3.js';
+import { getSolanaConnection } from './solana';
+import { collection, getDocs, getDoc, doc, query, where, orderBy, setDoc, updateDoc, limit } from 'firebase/firestore';
 import { db } from '@/lib/firebase/config';
-import { lamportsToSol } from '@/lib/solana/config';
-import { WalletContextState } from '@solana/wallet-adapter-react';
+import { ENV } from '@/lib/env';
 
-// Add TypeScript declaration for window.solana
-declare global {
-  interface Window {
-    solana?: {
-      signMessage?: (message: Uint8Array, encoding: string) => Promise<Uint8Array>;
-      isPhantom?: boolean;
-      connect?: () => Promise<{ publicKey: string }>;
-    };
+// Program ID
+const PROGRAM_ID = new PublicKey(ENV.PROGRAM_ID);
+
+/**
+ * Fetch all bounties from Firebase
+ */
+export async function getAllBounties() {
+  try {
+    const bountimesRef = collection(db, 'bounties');
+    const q = query(bountimesRef, orderBy('createdAt', 'desc'));
+    const querySnapshot = await getDocs(q);
+    
+    const bounties = querySnapshot.docs.map(doc => ({
+      id: doc.id,
+      ...doc.data()
+    }));
+    
+    return bounties;
+  } catch (error) {
+    console.error('Error fetching bounties:', error);
+    throw error;
   }
 }
 
-// Interface for bounty data stored in Firebase
+/**
+ * Fetch a single bounty by address
+ */
+export async function getBountyByAddress(address: string) {
+  try {
+    const bountyRef = doc(db, 'bounties', address);
+    const bountyDoc = await getDoc(bountyRef);
+    
+    if (!bountyDoc.exists()) {
+      throw new Error('Bounty not found');
+    }
+    
+    return {
+      id: bountyDoc.id,
+      ...bountyDoc.data()
+    };
+  } catch (error) {
+    console.error(`Error fetching bounty ${address}:`, error);
+    throw error;
+  }
+}
+
+/**
+ * Fetch submissions for a specific bounty
+ */
+export async function getSubmissionsForBounty(bountyAddress: string) {
+  try {
+    const submissionsRef = collection(db, 'submissions');
+    const q = query(
+      submissionsRef, 
+      where('bountyAddress', '==', bountyAddress),
+      orderBy('createdAt', 'desc')
+    );
+    const querySnapshot = await getDocs(q);
+    
+    const submissions = querySnapshot.docs.map(doc => ({
+      id: doc.id,
+      ...doc.data()
+    }));
+    
+    return submissions;
+  } catch (error) {
+    console.error(`Error fetching submissions for bounty ${bountyAddress}:`, error);
+    throw error;
+  }
+}
+
+/**
+ * Fetch a user's submissions
+ */
+export async function getUserSubmissions(userAddress: string) {
+  try {
+    const submissionsRef = collection(db, 'submissions');
+    const q = query(
+      submissionsRef, 
+      where('auditor', '==', userAddress),
+      orderBy('createdAt', 'desc')
+    );
+    const querySnapshot = await getDocs(q);
+    
+    const submissions = querySnapshot.docs.map(doc => ({
+      id: doc.id,
+      ...doc.data()
+    }));
+    
+    return submissions;
+  } catch (error) {
+    console.error(`Error fetching submissions for user ${userAddress}:`, error);
+    throw error;
+  }
+}
+
+/**
+ * Store submission metadata in Firebase
+ */
+export async function storeSubmissionMetadata(
+  submissionData: {
+    submissionAddress: string;
+    bountyAddress: string;
+    auditor: string;
+    description: string;
+    ipfsHash: string;
+    severity: number;
+  }
+) {
+  try {
+    // Add created timestamp and initial status
+    const data = {
+      ...submissionData,
+      createdAt: Date.now(),
+      status: 'pending',
+      upvotes: 0,
+      downvotes: 0,
+      isWinner: false,
+    };
+    
+    // Store in Firestore
+    const submissionRef = doc(db, 'submissions', submissionData.submissionAddress);
+    await setDoc(submissionRef, data);
+    
+    return { success: true };
+  } catch (error) {
+    console.error('Error storing submission metadata:', error);
+    throw error;
+  }
+}
+
+/**
+ * Approve a submission and update its status
+ */
+export async function approveSubmission(bountyAddress: string, submissionId: string) {
+  try {
+    const submissionRef = doc(db, 'submissions', submissionId);
+    await updateDoc(submissionRef, {
+      status: 'approved',
+      updatedAt: Date.now()
+    });
+    
+    return { success: true };
+  } catch (error) {
+    console.error(`Error approving submission ${submissionId}:`, error);
+    throw error;
+  }
+}
+
+/**
+ * Update bounty status
+ */
+export async function updateStatus(bountyId: string, status: string) {
+  try {
+    const bountyRef = doc(db, 'bounties', bountyId);
+    await updateDoc(bountyRef, {
+      status: status,
+      updatedAt: Date.now()
+    });
+    
+    return { success: true };
+  } catch (error) {
+    console.error(`Error updating bounty status to ${status}:`, error);
+    throw error;
+  }
+}
+
+// Export type definitions
 export interface IBounty {
-  bountyAmount: number;
-  submissionsCount: number | undefined;
   id: string;
   title: string;
   description: string;
-  repoUrl?: string;
+  repoUrl: string;
+  amount: number;
+  bountyAmount?: number; // Alternative property name
+  status: 'open' | 'closed' | 'cancelled' | 'draft' | 'cancelling' | 'completing' | 'completed';
+  submissionCount?: number;
+  submissionsCount?: number; // Alternative property name
+  approvedCount?: number;
+  owner: string;
+  ownerName?: string;
+  deadline: string | Date;
+  createdAt: string | Date;
   tags: string[];
-  amount: number; // in SOL
-  tokenMint?: string; // SOL or USDC
-  deadline: number; // Unix timestamp
-  createdAt: number; // Unix timestamp
-  updatedAt?: number; // Unix timestamp
-  createdBy: string; // creator's wallet address
-  creatorUid: string; // creator's Firebase user ID
-  bountyPda: string;
-  vaultPda: string;
-  status: string; // "open", "approved", "claimed", "cancelled"
-  submissions?: string[]; // Array of submission IDs
-  approvedHunter?: string; // Approved hunter's wallet address
+  solanaAddress?: string;
   transactionHash?: string;
-  severityWeights?: {
-    critical: number;
-    high: number;
-    medium: number;
-    low: number;
-    informational?: number;
-  };
-  owner?: string; // For API compatibility
-  ownerName?: string; // For API compatibility
-  walletAddress?: string; // For API compatibility
-  solanaAddress?: string; // For API compatibility
-  submissionCount?: number; // For API compatibility
-  approvedCount?: number; // For API compatibility
+  tokenMint?: string;
 }
 
-// Enum for bounty status in Firebase
-export enum BountyStatusFirebase {
-  OPEN = 'open',
-  APPROVED = 'approved',
-  CLAIMED = 'claimed',
-  CANCELLED = 'cancelled',
-}
-
-// Map Solana status to Firebase status
-function mapSolanaStatusToFirebase(status: BountyStatus): BountyStatusFirebase {
-  switch (status) {
-    case BountyStatus.Open:
-      return BountyStatusFirebase.OPEN;
-    case BountyStatus.Approved:
-      return BountyStatusFirebase.APPROVED;
-    case BountyStatus.Claimed:
-      return BountyStatusFirebase.CLAIMED;
-    case BountyStatus.Cancelled:
-      return BountyStatusFirebase.CANCELLED;
-    default:
-      return BountyStatusFirebase.OPEN;
-  }
-}
-
-// Map Firebase status to Solana status
-function mapFirebaseStatusToSolana(status: BountyStatusFirebase): BountyStatus {
-  switch (status) {
-    case BountyStatusFirebase.OPEN:
-      return BountyStatus.Open;
-    case BountyStatusFirebase.APPROVED:
-      return BountyStatus.Approved;
-    case BountyStatusFirebase.CLAIMED:
-      return BountyStatus.Claimed;
-    case BountyStatusFirebase.CANCELLED:
-      return BountyStatus.Cancelled;
-    default:
-      return BountyStatus.Open;
-  }
-}
-
+// Class version of BountyService for legacy code support
 export class Bounty {
-  // Static methods for the dashboard
-  static async getAll({ owner, limit }: { owner: string; limit: number }): Promise<IBounty[]> {
-    const bountyCollection = collection(db, 'bounties');
-    const q = query(bountyCollection, where("creatorUid", "==", owner), where("status", "!=", ""));
-    const querySnapshot = await getDocs(q);
-    const bounties = querySnapshot.docs.map(doc => doc.data() as IBounty);
-    return bounties.slice(0, limit);
-  }
-
-  static async getStats({ owner }: { owner: string }): Promise<{
-    totalCount: number;
-    totalAmount: number;
-  }> {
-    const bountyCollection = collection(db, 'bounties');
-    const q = query(bountyCollection, where("creatorUid", "==", owner));
-    const querySnapshot = await getDocs(q);
-    
-    const bounties = querySnapshot.docs.map(doc => doc.data() as IBounty);
-    const totalAmount = bounties.reduce((sum, bounty) => sum + bounty.amount, 0);
-    
-    return {
-      totalCount: bounties.length,
-      totalAmount
-    };
-  }
-
-  static async create(bountyData: any): Promise<{ id: string }> {
-    // Create a bounty document with a generated ID
-    const bountyCollection = collection(db, 'bounties');
-    
-    // Use a custom ID if provided, otherwise generate one
-    const docId = bountyData.id || doc(bountyCollection).id;
-    const docRef = doc(bountyCollection, docId);
-    
-    // Ensure the ID is set in the bounty data
-    const completeData = {
-      ...bountyData,
-      id: docId, // Make sure the ID is reflected in the stored data
-      submissionsCount: bountyData.submissionsCount || 0, // Ensure submissionsCount is 0 not undefined
-      submissionCount: bountyData.submissionCount || 0,   // Ensure submissionCount is 0 not undefined
-      approvedCount: bountyData.approvedCount || 0,       // Ensure approvedCount is 0 not undefined
-    };
-    
-    // Store document in Firestore
-    await setDoc(docRef, completeData);
-    console.log(`Bounty created with ID: ${docId}`);
-    
-    // Return the ID for reference
-    return { id: docId };
-  }
-
-  static async updateStatus(id: string, status: string) {
+  static async getAll(options?: { owner?: string, limit?: number }) {
     try {
-      console.log(`Updating status for bounty ${id} to ${status}`);
+      const bountiesRef = collection(db, 'bounties');
       
-      // Get the bounty document reference
-      const bountyRef = doc(db, 'bounties', id);
+      // Build query based on options
+      let queryRef = query(bountiesRef, orderBy('createdAt', 'desc'));
       
-      // Update the bounty status
-      await updateDoc(bountyRef, {
-        status: status,
-        updatedAt: new Date().getTime()
+      if (options?.owner) {
+        queryRef = query(queryRef, where('owner', '==', options.owner));
+      }
+      
+      if (options?.limit) {
+        queryRef = query(queryRef, limit(options.limit));
+      }
+      
+      // Execute query
+      const querySnapshot = await getDocs(queryRef);
+      
+      // Transform data
+      const bounties = querySnapshot.docs.map(doc => {
+        const data = doc.data();
+        return {
+          id: doc.id,
+          title: data.title || '',
+          description: data.description || '',
+          repoUrl: data.repoUrl || '',
+          amount: data.amount || 0,
+          status: data.status || 'open',
+          submissionCount: data.submissionCount || 0,
+          approvedCount: data.approvedCount || 0,
+          owner: data.owner || '',
+          ownerName: data.ownerName || 'Unknown',
+          deadline: data.deadline 
+            ? new Date(data.deadline.toDate ? data.deadline.toDate() : data.deadline) 
+            : new Date(),
+          createdAt: data.createdAt
+            ? new Date(data.createdAt.toDate ? data.createdAt.toDate() : data.createdAt)
+            : new Date(),
+          tags: data.tags || [],
+          solanaAddress: data.solanaAddress || ''
+        } as IBounty;
       });
       
-      console.log(`Successfully updated status for bounty ${id}`);
-      return true;
+      return bounties;
     } catch (error) {
-      console.error('Error updating bounty status:', error);
-      throw error;
+      console.error('Error fetching bounties:', error);
+      return [];
     }
+  }
+
+  static async getStats(options?: { owner?: string }) {
+    try {
+      // Get bounties for this owner
+      const bounties = await this.getAll(options);
+      
+      // Calculate stats
+      const totalCount = bounties.length;
+      const totalAmount = bounties.reduce((sum, bounty) => sum + (bounty.amount || 0), 0);
+      
+      // Count submissions if needed
+      let submissionCount = 0;
+      let approvedCount = 0;
+      
+      // For more accurate stats, we would query the submissions collection
+      // but for simplicity, we'll use the cached counts on the bounty objects
+      submissionCount = bounties.reduce((sum, bounty) => sum + (bounty.submissionCount || 0), 0);
+      approvedCount = bounties.reduce((sum, bounty) => sum + (bounty.approvedCount || 0), 0);
+      
+      return {
+        totalCount,
+        totalAmount,
+        submissionCount,
+        approvedCount
+      };
+    } catch (error) {
+      console.error('Error fetching bounty stats:', error);
+      return {
+        totalCount: 0,
+        totalAmount: 0,
+        submissionCount: 0,
+        approvedCount: 0
+      };
+    }
+  }
+
+  static async updateStatus(bountyId: string, status: string) {
+    return updateStatus(bountyId, status);
   }
 
   static async approveSubmission(bountyId: string, submissionId: string) {
-    try {
-      console.log(`Approving submission ${submissionId} for bounty ${bountyId}`);
-      
-      // Get the submission document reference
-      const submissionRef = doc(db, 'submissions', submissionId);
-      const submissionDoc = await getDoc(submissionRef);
-      
-      if (!submissionDoc.exists()) {
-        throw new Error(`Submission ${submissionId} not found`);
-      }
-      
-      const submissionData = submissionDoc.data();
-      
-      // Get the bounty document 
-      const bountyRef = doc(db, 'bounties', bountyId);
-      const bountySnapshot = await getDoc(bountyRef);
-      
-      if (!bountySnapshot.exists()) {
-        throw new Error(`Bounty ${bountyId} not found`);
-      }
-      
-      const bountyData = bountySnapshot.data();
-      
-      // Get hunter wallet address from different possible locations
-      const hunterAddress = submissionData.auditorWalletAddress || 
-                         submissionData.createdBy || 
-                         (submissionData.auditor && typeof submissionData.auditor === 'object' ? 
-                           submissionData.auditor.walletAddress : undefined);
-      
-      // Validate hunter address
-      if (!hunterAddress) {
-        throw new Error('Hunter wallet address not found. Make sure the auditor has connected their wallet.');
-      }
-      
-      try {
-        // Only update the submission status in Firebase
-        // We'll do the blockchain transaction separately when the user clicks "Pay Auditor"
-        
-        // Update submission status to approved
-        await updateDoc(submissionRef, {
-          status: 'approved',
-          reviewedAt: new Date().getTime(),
-          updatedAt: new Date().getTime()
-        });
-        
-        // Update bounty status in Firebase
-        await updateDoc(bountyRef, {
-          approvedCount: (bountyData.approvedCount || 0) + 1,
-          status: BountyStatusFirebase.APPROVED,
-          approvedHunter: hunterAddress,
-          updatedAt: new Date().getTime()
-        });
-        
-        console.log(`Successfully approved submission ${submissionId} for bounty ${bountyId} in Firebase`);
-        return 'firebase-approval-only';
-        
-      } catch (dbError) {
-        console.error('Error updating approval status in database:', dbError);
-        throw new Error(
-          dbError instanceof Error
-            ? `Database Error: ${dbError.message}`
-            : 'Unknown database error occurred'
-        );
-      }
-    } catch (error) {
-      console.error('Error approving submission:', error);
-      throw error;
-    }
+    return approveSubmission(bountyId, submissionId);
   }
+}
 
-  private solanaService: SolanaService | null = null;
-  private bountyCollection = collection(db, 'bounties');
-
-  // Set the Solana service instance
-  setSolanaService(service: SolanaService) {
-    this.solanaService = service;
-  }
-
-  // Create a new bounty
-  async createBounty(
-    bountyData: Omit<IBounty, 'id' | 'bountyPda' | 'vaultPda' | 'status' | 'submissions' | 'approvedHunter' | 'transactionHash'>,
-    wallet: string,
-    uid: string
-  ): Promise<IBounty> {
-    if (!this.solanaService) {
-      throw new Error('Solana service is not initialized');
-    }
-
-    // Create the bounty on the blockchain
-    const { signature, bountyPda, vaultPda } = await this.solanaService.createBounty(
-      bountyData.amount,
-      bountyData.deadline,
-    );
-
-    // Create a new bounty document in Firebase
-    const newBounty: IBounty = {
-      ...bountyData,
-      id: bountyPda, // Use the bountyPda as the ID for easy lookup
-      bountyPda,
-      vaultPda,
-      status: BountyStatusFirebase.OPEN,
-      createdBy: wallet,
-      creatorUid: uid,
-      transactionHash: signature,
-      submissions: [],
-    };
-
-    // Store in Firebase
-    await setDoc(doc(this.bountyCollection, bountyPda), newBounty);
-
-    return newBounty;
-  }
-
-  // Get all bounties
-  async getAllBounties(): Promise<IBounty[]> {
-    const querySnapshot = await getDocs(this.bountyCollection);
-    return querySnapshot.docs.map(doc => doc.data() as IBounty);
-  }
-
-  // Get bounties by status
-  async getBountiesByStatus(status: BountyStatusFirebase): Promise<IBounty[]> {
-    const q = query(this.bountyCollection, where("status", "==", status));
-    const querySnapshot = await getDocs(q);
-    return querySnapshot.docs.map(doc => doc.data() as IBounty);
-  }
-
-  // Get bounties created by a specific user
-  async getBountiesByCreator(creatorAddress: string): Promise<IBounty[]> {
-    const q = query(this.bountyCollection, where("createdBy", "==", creatorAddress));
-    const querySnapshot = await getDocs(q);
-    return querySnapshot.docs.map(doc => doc.data() as IBounty);
-  }
-
-  // Get bounties by creator UID
-  async getBountiesByCreatorUid(uid: string): Promise<IBounty[]> {
-    const q = query(this.bountyCollection, where("creatorUid", "==", uid));
-    const querySnapshot = await getDocs(q);
-    return querySnapshot.docs.map(doc => doc.data() as IBounty);
-  }
-
-  // Get a single bounty by ID (bountyPda)
-  async getBountyById(id: string): Promise<IBounty | null> {
-    const docRef = doc(this.bountyCollection, id);
-    const docSnap = await getDoc(docRef);
-    return docSnap.exists() ? docSnap.data() as IBounty : null;
-  }
-
-  // Sync a bounty's status with on-chain data
-  async syncBountyStatus(bountyPda: string): Promise<IBounty | null> {
-    if (!this.solanaService) {
-      throw new Error('Solana service is not initialized');
-    }
-
-    // Get bounty data from chain
-    const onChainData = await this.solanaService.getBountyData(bountyPda);
-    if (!onChainData) {
-      console.error('Bounty not found on-chain');
-      return null;
-    }
-
-    // Get current bounty data from Firebase
-    const bounty = await this.getBountyById(bountyPda);
-    if (!bounty) {
-      console.error('Bounty not found in Firebase');
-      return null;
-    }
-
-    // Update status based on on-chain data
-    const newStatus = mapSolanaStatusToFirebase(onChainData.status);
-    
-    // Update hunter if it exists
-    const approvedHunter = onChainData.hunter ? onChainData.hunter.toString() : undefined;
-
-    // Update bounty in Firebase
-    const updatedBounty: IBounty = {
-      ...bounty,
-      status: newStatus,
-      approvedHunter,
-      amount: lamportsToSol(onChainData.amount),
-    };
-
-    await updateDoc(doc(this.bountyCollection, bountyPda), {
-      status: newStatus,
-      approvedHunter,
-      amount: lamportsToSol(onChainData.amount),
-    });
-
-    return updatedBounty;
-  }
-
-  // Submit work for a bounty
-  async submitWork(bountyPda: string, submissionUrl: string): Promise<string> {
-    if (!this.solanaService) {
-      throw new Error('Solana service is not initialized');
-    }
-
-    // Submit work on-chain
-    const signature = await this.solanaService.submitWork(bountyPda, submissionUrl);
-    return signature;
-  }
-
-  // Approve a bounty submission
-  async approveBounty(bountyPda: string, hunterAddress: string): Promise<string> {
-    if (!this.solanaService) {
-      throw new Error('Solana service is not initialized');
-    }
-
-    // Approve submission on-chain
-    const signature = await this.solanaService.approveSubmission(bountyPda, hunterAddress);
-
-    // Update bounty status in Firebase
-    await updateDoc(doc(this.bountyCollection, bountyPda), {
-      status: BountyStatusFirebase.APPROVED,
-      approvedHunter: hunterAddress,
-    });
-
-    return signature;
-  }
-
-  // Claim a bounty
-  async claimBounty(bountyPda: string): Promise<string> {
-    if (!this.solanaService) {
-      throw new Error('Solana service is not initialized');
-    }
-
-    // Claim bounty on-chain
-    const signature = await this.solanaService.claimBounty(bountyPda);
-
-    // Update bounty status in Firebase
-    await updateDoc(doc(this.bountyCollection, bountyPda), {
-      status: BountyStatusFirebase.CLAIMED,
-    });
-
-    return signature;
-  }
-
-  // Cancel a bounty
-  async cancelBounty(bountyPda: string): Promise<string> {
-    if (!this.solanaService) {
-      throw new Error('Solana service is not initialized');
-    }
-
-    // Cancel bounty on-chain
-    const signature = await this.solanaService.cancelBounty(bountyPda);
-
-    // Update bounty status in Firebase
-    await updateDoc(doc(this.bountyCollection, bountyPda), {
-      status: BountyStatusFirebase.CANCELLED,
-    });
-
-    return signature;
-  }
-} 
+// Export a BountyService object with all functions
+export const BountyService = {
+  getAllBounties,
+  getBountyByAddress,
+  getSubmissionsForBounty,
+  getUserSubmissions,
+  storeSubmissionMetadata,
+  approveSubmission,
+  updateStatus
+}; 

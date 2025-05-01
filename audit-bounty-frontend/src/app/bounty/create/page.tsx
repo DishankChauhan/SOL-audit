@@ -10,7 +10,13 @@ import { WalletVerifier } from '@/components/wallet/WalletVerifier';
 import { SolanaService } from '@/services/solana';
 import { TransactionStatus } from '@/components/transaction/TransactionStatus';
 import { TokenService, USDC_MINT } from '@/services/token';
-import { Transaction } from '@solana/web3.js';
+import { Transaction, PublicKey } from '@solana/web3.js';
+import { getConnection, getCluster } from '@/lib/solana/config';
+import { sendSignedTransactionToLocalnet } from '@/lib/solana/local-sender';
+import { debugTransactionInstruction } from '@/lib/solana/debug-utils';
+
+// Hard-coded program ID for reference
+const PROGRAM_ID = "Gd2hEeEPdvPN7bPdbkthPZHxsaRNTJWxcpp2pwRWBw4R";
 
 type FormData = {
   title: string;
@@ -158,173 +164,243 @@ export default function CreateBountyPage() {
 
   const handleCreateBounty = async (e: React.FormEvent) => {
     e.preventDefault();
-    setSubmitting(true);
-    setFormErrors({});
-    setTransactionStatus('processing');
     
-    // Validate form
-    const errors = validateForm();
-    if (Object.keys(errors).length > 0) {
-      setFormErrors(errors as Record<string, string | undefined>);
-      setTransactionStatus('error');
-      setSubmitting(false);
+    if (submitting) {
       return;
     }
-    
+
+    const errors = validateForm();
+    if (Object.keys(errors).length > 0) {
+      setFormErrors(errors);
+      return;
+    }
+
+    setSubmitting(true);
+    setTransactionStatus('processing');
+    setTransactionSignature(null);
+
     try {
-      if (!wallet.connected || !wallet.publicKey) {
-        throw new Error('Please connect your wallet first');
+      if (!user || !wallet.publicKey) {
+        throw new Error('Please connect your wallet and sign in to create a bounty');
       }
 
-      if (!user) {
-        throw new Error('Please sign in first');
-      }
-      
-      console.log("Verifying wallet ownership...");
-      const verification = await SolanaService.verifyWalletOwnership(wallet);
-      if (!verification.verified) {
-        console.error("Wallet verification failed:", verification.message);
-        throw new Error('Failed to verify wallet ownership: ' + verification.message);
-      }
-      console.log("Wallet verification successful, signature:", 
-        verification.signature?.substring(0, 10) + "..." );
-      
-      // Format the data for API
+      // Parse amount as a number
       const amount = parseFloat(formData.amount);
       if (isNaN(amount) || amount <= 0) {
-        setFormErrors({...formErrors, amount: 'Please enter a valid amount'});
-        setTransactionStatus('error');
-        setSubmitting(false);
-        return;
+        throw new Error('Invalid amount');
       }
+
+      console.log('Creating bounty with amount:', amount, formData.tokenType);
+
+      // Validate tags again (safeguard)
+      const validTags = formData.tags.filter(tag => tag.trim() !== '');
+      if (validTags.length === 0) {
+        validTags.push('security');
+      }
+
+      // STEP 1: Initialize a new bounty transaction
+      console.log('Initializing bounty transaction...');
+      console.log('Using program ID:', PROGRAM_ID);
       
-      const validTags = formData.tags.filter(tag => tag.trim().length > 0);
-      
-      console.log("Initializing bounty with API...");
-      console.log('Bounty amount from form data:', amount);
-      
-      // Create the bounty
-      const response = await fetch('/api/bounty/initialize', {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json'
-        },
-        body: JSON.stringify({
-          title: formData.title,
-          description: formData.description,
-          repoUrl: formData.repoUrl,
-          amount: amount,
-          tokenMint: formData.tokenType === 'USDC' ? USDC_MINT.toString() : 'SOL',
-          deadline: new Date(formData.deadline),
-          tags: validTags,
-          severityWeights: {
-            critical: parseInt(formData.severityWeights.critical.toString()),
-            high: parseInt(formData.severityWeights.high.toString()),
-            medium: parseInt(formData.severityWeights.medium.toString()),
-            low: parseInt(formData.severityWeights.low.toString()),
+      try {
+        // First, initialize the transaction
+        const initResponse = await fetch('/api/bounty/initialize', {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json'
           },
-          owner: user.uid,
-          walletAddress: wallet.publicKey.toString(),
-          ownerName: user.displayName || 'Anonymous',
-          walletSignature: verification.signature,
-          signatureMessage: verification.message
-        })
-      });
-      
-      if (!response.ok) {
-        const errorData = await response.json();
-        console.error("API error:", errorData);
-        throw new Error(errorData.error || 'Failed to create bounty');
-      }
-      
-      const { bountyId: initialBountyId, transactionBase64, error: transactionError, solanaError } = await response.json();
-      
-      // Create a variable that can be reassigned
-      let bountyId = initialBountyId;
-      
-      // Check if there was an error with the Solana transaction
-      if (transactionError) {
-        console.warn('Solana transaction error:', solanaError);
-        setFormErrors({
-          ...formErrors,
-          submit: `Bounty created but transaction failed: ${solanaError}. Please try funding it later.`
+          body: JSON.stringify({
+            title: formData.title,
+            description: formData.description,
+            repoUrl: formData.repoUrl,
+            amount: amount,
+            deadline: new Date(formData.deadline),
+            tags: validTags,
+            creatorWallet: wallet.publicKey.toString(),
+            severityWeights: {
+              critical: formData.severityWeights.critical,
+              high: formData.severityWeights.high,
+              medium: formData.severityWeights.medium,
+              low: formData.severityWeights.low,
+              informational: 2, // Default value
+            },
+            winnersCount: 1
+          })
         });
-        setTransactionStatus('error');
         
-        // Still allow navigation to the bounty page after a delay
-        setTimeout(() => {
-          router.push(`/bounty/${bountyId || 'my'}`);
-        }, 5000);
-        
-        return;
-      }
-      
-      // Fund the bounty with either SOL or USDC
-      let txResult;
-      
-      if (formData.tokenType === 'USDC') {
-        console.log("Funding bounty with USDC...");
-        // Fund with USDC tokens
-        txResult = await TokenService.fundBountyWithUSDC(
-          wallet,
-          bountyId,
-          amount
-        );
-      } else {
-        console.log('Funding bounty with SOL using initializeBounty...');
-        console.log('Bounty amount passed to initializeBounty:', amount);
-        
-        // Fund with SOL
-        txResult = await SolanaService.initializeBounty(wallet, {
-          title: formData.title,
-          description: formData.description,
-          repoUrl: formData.repoUrl,
-          amount: amount,
-          deadline: new Date(formData.deadline),
-          tags: validTags,
-          severityWeights: {
-            critical: parseInt(formData.severityWeights.critical.toString()),
-            high: parseInt(formData.severityWeights.high.toString()),
-            medium: parseInt(formData.severityWeights.medium.toString()),
-            low: parseInt(formData.severityWeights.low.toString()),
-            informational: 0 // Default value
+        if (!initResponse.ok) {
+          let errorData;
+          try {
+            errorData = await initResponse.json();
+          } catch (e) {
+            errorData = { error: `HTTP error ${initResponse.status}: ${initResponse.statusText}` };
           }
+          console.error("API error:", errorData);
+          throw new Error(errorData.error || 'Failed to initialize bounty transaction');
+        }
+        
+        const initData = await initResponse.json();
+        console.log('Transaction initialized:', initData);
+        
+        const { transaction, bountyAddress, vaultAddress, metadata } = initData;
+        
+        if (!transaction) {
+          throw new Error('No transaction data was returned from the server');
+        }
+        
+        // STEP 2: Sign the transaction with the wallet
+        console.log('Signing transaction...');
+        const transactionBuffer = Buffer.from(transaction, 'base64');
+        
+        // Debug transaction buffer
+        console.log('Transaction buffer length:', transactionBuffer.length);
+        console.log('First 32 bytes:', Buffer.from(transactionBuffer.slice(0, 32)).toString('hex'));
+        
+        // Deserialize and sign the transaction
+        const tx = Transaction.from(transactionBuffer);
+        
+        // Verify the transaction is correctly formed
+        console.log('Transaction details:');
+        console.log(' - Program ID:', tx.instructions[0]?.programId.toString());
+        console.log(' - Has recent blockhash:', !!tx.recentBlockhash);
+        console.log(' - Fee payer:', tx.feePayer?.toString());
+        console.log(' - Instruction data length:', tx.instructions[0]?.data.length);
+        
+        // Use our detailed debug utility to analyze the instruction
+        if (tx.instructions.length > 0) {
+          debugTransactionInstruction(tx.instructions[0]);
+        }
+        
+        let signedTransaction;
+        
+        try {
+          if (!wallet.signTransaction) {
+            throw new Error('Wallet does not support transaction signing');
+          }
+          
+          signedTransaction = await wallet.signTransaction(tx);
+          console.log('Transaction signed successfully');
+        } catch (signingError) {
+          console.error('Transaction signing error:', signingError);
+          throw new Error(`Failed to sign transaction: ${signingError instanceof Error ? signingError.message : String(signingError)}`);
+        }
+        
+        // STEP 3: Send the signed transaction to the blockchain
+        console.log('Sending signed transaction to the blockchain...');
+        let sendResponse;
+        let sendData;
+        
+        // Check if we're on localnet - if so, use our direct sender
+        const cluster = getCluster();
+        if (cluster === 'localnet') {
+          try {
+            console.log('Detected localnet, using direct transaction sender');
+            // Send directly to localnet (bypassing Phantom's RPC limitations)
+            const signature = await sendSignedTransactionToLocalnet(signedTransaction);
+            
+            sendData = {
+              signature,
+              success: true
+            };
+          } catch (error) {
+            console.error("Transaction error:", error);
+            throw new Error(`Failed to send transaction to localnet: ${error instanceof Error ? error.message : String(error)}`);
+          }
+        } else {
+          // For devnet/mainnet, use our regular API endpoint
+          sendResponse = await fetch('/api/solana/transaction/send', {
+            method: 'POST',
+            headers: {
+              'Content-Type': 'application/json'
+            },
+            body: JSON.stringify({
+              signedTransaction: Buffer.from(signedTransaction.serialize()).toString('base64')
+            })
+          });
+          
+          if (!sendResponse.ok) {
+            let errorData;
+            try {
+              errorData = await sendResponse.json();
+              console.error("Transaction error:", errorData);
+              
+              // Check for simulation logs
+              if (errorData.simulationLogs || errorData.logs) {
+                const logs = errorData.simulationLogs || errorData.logs;
+                console.log("Transaction simulation logs:");
+                logs.forEach((log: string, i: number) => {
+                  console.log(`  ${i}: ${log}`);
+                });
+              }
+              
+              // Provide a better error message if available
+              let errorMessage = errorData.error || 'Failed to send transaction to the blockchain';
+              if (errorData.details) {
+                errorMessage += `: ${JSON.stringify(errorData.details)}`;
+              }
+              throw new Error(errorMessage);
+            } catch (e) {
+              if (e instanceof Error && e.message.includes('Failed to send transaction')) {
+                throw e;
+              }
+              throw new Error(`HTTP error ${sendResponse.status}: ${sendResponse.statusText}`);
+            }
+          }
+          
+          sendData = await sendResponse.json();
+        }
+        
+        console.log('Transaction sent:', sendData);
+        
+        setTransactionSignature(sendData.signature);
+        
+        // STEP 4: Store metadata in Firebase
+        console.log('Storing bounty metadata...');
+        const metadataResponse = await fetch('/api/bounty/metadata', {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json'
+          },
+          body: JSON.stringify({
+            bountyAddress,
+            metadata: {
+              ...metadata,
+              createdBy: user.uid,
+              creatorName: user.displayName || 'Anonymous',
+              status: 'active',
+              transactionSignature: sendData.signature
+            }
+          })
         });
         
-        console.log('initializeBounty result:', txResult);
-        
-        if (txResult.status === 'error') {
-          console.error('initializeBounty error:', txResult.message);
+        if (!metadataResponse.ok) {
+          const errorData = await metadataResponse.json();
+          console.error("Metadata error:", errorData);
+          // Don't throw here - the blockchain transaction is already confirmed
+          console.warn('Failed to store metadata, but transaction was successful');
+        } else {
+          console.log('Metadata stored successfully');
         }
         
-        // Store the bountyId from the result if it's provided
-        if (txResult.bountyId) {
-          bountyId = txResult.bountyId;
-        }
+        // STEP 5: Success! Redirect to the bounty page
+        setTransactionStatus('success');
+        
+        // Wait a moment for the user to see the success message
+        setTimeout(() => {
+          router.push(`/bounty/${bountyAddress}`);
+        }, 2000);
+        
+      } catch (error) {
+        console.error("Error creating bounty metadata:", error);
+        setTransactionStatus('error');
+        throw new Error(`Failed to create bounty metadata: ${error instanceof Error ? error.message : String(error)}`);
       }
-      
-      if (txResult.status === 'error') {
-        throw new Error(txResult.message);
-      }
-
-      if (txResult.signature) {
-        setTransactionSignature(txResult.signature);
-      } else {
-        setTransactionSignature(null);
-      }
-      setTransactionStatus('success');
-
-      // Redirect to the bounty page after a delay
-      setTimeout(() => {
-        router.push(`/bounty/${bountyId || 'my'}`);
-      }, 3000);
-    } catch (err) {
-      console.error('Error creating bounty:', err);
-      setFormErrors({
-        ...formErrors,
-        submit: `Failed to create bounty: ${(err as Error).message}`
-      });
+    } catch (error) {
+      console.error("Error creating bounty:", error);
       setTransactionStatus('error');
+      setFormErrors({
+        submit: `Failed to create bounty: ${error instanceof Error ? error.message : String(error)}`
+      });
     } finally {
       setSubmitting(false);
     }

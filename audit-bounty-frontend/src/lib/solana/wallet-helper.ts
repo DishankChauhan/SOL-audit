@@ -1,29 +1,20 @@
 import { WalletContextState } from '@solana/wallet-adapter-react';
 
-// Global store for wallet context
-let globalWalletContext: WalletContextState | null = null;
-
 /**
- * Set the wallet context state for use outside of React components
+ * Set global wallet context state for client-side use
  */
-export function setWalletContextState(wallet: WalletContextState): void {
-  globalWalletContext = wallet;
-}
-
-/**
- * Get the wallet context state for use outside of React components
- * @throws Error if the wallet context is not initialized
- */
-export function getWalletContextState(): WalletContextState {
-  if (!globalWalletContext) {
-    throw new Error('Wallet context not initialized. Use setWalletContextState first.');
+export const setWalletContextState = (wallet: WalletContextState): void => {
+  if (typeof window !== 'undefined') {
+    (window as any).solanaWalletContextState = wallet;
   }
-  return globalWalletContext;
-}
+};
 
 /**
- * Reset the global wallet context
+ * Get global wallet context state for client-side use
  */
-export function resetWalletContextState(): void {
-  globalWalletContext = null;
-} 
+export const getWalletContextState = (): WalletContextState | null => {
+  if (typeof window !== 'undefined') {
+    return (window as any).solanaWalletContextState || null;
+  }
+  return null;
+}; 

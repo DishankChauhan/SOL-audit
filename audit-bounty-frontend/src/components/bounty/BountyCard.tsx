@@ -49,7 +49,7 @@ export function BountyCard({ bounty }: BountyCardProps) {
         <p className="text-sm line-clamp-2 mb-2">{bounty.description}</p>
         <div className="flex flex-wrap gap-1 mb-2">
           {bounty.tags?.map((tag: string, index: number) => (
-            <Badge key={index} variant="outline" className="text-xs">
+            <Badge key={index} className="text-xs">
               {tag}
             </Badge>
           ))}

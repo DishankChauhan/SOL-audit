@@ -17,6 +17,8 @@ pub struct BountyAccount {
     pub deadline: i64,          // Expiry timestamp (unix seconds)
     pub status: BountyStatus,   // Open, Approved, Claimed, Cancelled
     pub initialized: bool,      // Initialization flag
+    pub winners_count: u8,      // Maximum number of winners (default 1)
+    pub current_winners: u8,    // Current number of winners selected
 }
 
 impl BountyAccount {
@@ -27,21 +29,23 @@ impl BountyAccount {
 
 #[derive(BorshSerialize, BorshDeserialize, Clone, Debug, PartialEq)]
 pub struct Submission {
-    pub id: u64,
-    pub bounty_id: u64,
-    pub auditor: Pubkey,
-    pub description: String,
-    pub severity: String,
-    pub poc_url: String,
-    pub fix_url: Option<String>,
-    pub status: SubmissionStatus,
-    pub payout_amount: Option<u64>,
-    pub disputes_count: u64,
+    pub id: String,             // Unique submission ID
+    pub bounty_id: Pubkey,      // Associated bounty
+    pub auditor: Pubkey,        // Who submitted the work
+    pub description: String,    // Brief description
+    pub ipfs_hash: String,      // IPFS hash of the detailed report
+    pub severity: u8,           // Severity level (1-5)
+    pub upvotes: u64,           // Number of upvotes
+    pub downvotes: u64,         // Number of downvotes
+    pub status: SubmissionStatus, // Status of the submission
+    pub payout_amount: Option<u64>, // Amount paid if approved
+    pub is_winner: bool,        // If this submission was selected as a winner
+    pub created_at: i64,        // Timestamp when created
 }
 
 impl Submission {
     pub fn is_initialized(&self) -> bool {
-        self.id != 0
+        !self.id.is_empty()
     }
 }
 
@@ -51,6 +55,22 @@ pub enum SubmissionStatus {
     Approved,
     Rejected,
     Disputed,
+}
+
+#[derive(BorshSerialize, BorshDeserialize, Clone, Debug, PartialEq)]
+pub struct Vote {
+    pub voter: Pubkey,          // Who voted
+    pub submission: Pubkey,     // Which submission was voted on
+    pub bounty: Pubkey,         // Associated bounty
+    pub vote_type: VoteType,    // Type of vote
+    pub timestamp: i64,         // When the vote was cast
+}
+
+#[derive(BorshSerialize, BorshDeserialize, Clone, Debug, PartialEq)]
+pub enum VoteType {
+    None,
+    Up,
+    Down,
 }
 
 #[derive(BorshSerialize, BorshDeserialize, Clone, Debug, PartialEq)]
@@ -74,8 +94,9 @@ pub enum DisputeStatus {
     Resolved,
 }
 
-#[derive(BorshSerialize, BorshDeserialize, Clone, Debug, PartialEq)]  
+#[derive(BorshSerialize, BorshDeserialize, Clone, Debug, PartialEq)]
 pub enum DisputeResolution {
-    Auditor,
-    Owner,
+    SubmitterWon,
+    DisputerWon,
+    Compromise,
 } 

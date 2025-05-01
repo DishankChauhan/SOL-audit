@@ -17,6 +17,8 @@ pub enum BountyInstruction {
         deadline: i64,
         /// Optional custom seed for PDA derivation
         custom_seed: Option<Vec<u8>>,
+        /// Maximum number of winners (default 1)
+        winners_count: Option<u8>,
     },
 
     /// Submit work for a bounty (optional)
@@ -38,6 +40,8 @@ pub enum BountyInstruction {
     ApproveSubmission {
         /// Public key of the hunter to approve
         hunter: Pubkey,
+        /// Submission ID
+        submission_id: String,
     },
 
     /// Claim bounty reward after approval
@@ -57,4 +61,64 @@ pub enum BountyInstruction {
     /// 2. `[writable]` Vault account (PDA) - holds the SOL to be returned
     /// 3. `[]` System program
     CancelBounty,
+
+    /// Cancels a bounty by creator at any time
+    /// Accounts:
+    /// 0. `[signer]` Creator account
+    /// 1. `[writable]` Bounty account (PDA)
+    /// 2. `[writable]` Vault account (PDA)
+    /// 3. `[]` System program
+    CancelBountyEmergency,
+
+    /// Records detailed submission metadata on-chain
+    /// Accounts:
+    /// 0. `[signer]` Hunter account
+    /// 1. `[]` Bounty account (PDA)
+    /// 2. `[writable]` Submission metadata account (PDA)
+    /// 3. `[]` System program
+    RecordSubmission {
+        /// Unique submission ID
+        submission_id: String,
+        /// Severity rating (1-5)
+        severity: u8,
+        /// Brief description of findings
+        description: String,
+        /// IPFS hash of the detailed report
+        ipfs_hash: String,
+    },
+
+    /// Vote on a submission (up or down)
+    /// Accounts:
+    /// 0. `[signer]` Voter account
+    /// 1. `[]` Bounty account (PDA)
+    /// 2. `[writable]` Submission account (PDA)
+    /// 3. `[writable]` Vote account (PDA)
+    /// 4. `[]` System program
+    VoteOnSubmission {
+        /// Submission ID to vote on
+        submission_id: String,
+        /// Vote type (true = upvote, false = downvote)
+        is_upvote: bool,
+    },
+
+    /// Select a winner based on votes
+    /// Accounts:
+    /// 0. `[signer]` Creator account
+    /// 1. `[writable]` Bounty account (PDA)
+    /// 2. `[writable]` Submission account (PDA)
+    /// 3. `[]` System program
+    SelectWinner {
+        /// Submission ID to select as winner
+        submission_id: String,
+        /// Amount to pay this winner (must be <= bounty total / winners_count)
+        payout_amount: u64,
+    },
+
+    /// Distribute remaining bounty to creator
+    /// Accounts:
+    /// 0. `[signer]` Creator account
+    /// 1. `[writable]` Bounty account (PDA)
+    /// 2. `[writable]` Vault account (PDA)
+    /// 3. `[]` System program
+    FinalizeAndDistributeRemaining,
 } 

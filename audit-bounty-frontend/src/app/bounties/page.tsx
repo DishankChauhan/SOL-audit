@@ -603,9 +603,7 @@ export default function BountiesPage() {
                       )}
                     </div>
                     <div className="flex space-x-2">
-                      {user && ((typeof bounty.owner === 'object' && user.uid !== bounty.owner.id) || 
-                               (typeof bounty.owner === 'string' && user.uid !== bounty.owner)) && 
-                       bounty.status === 'open' && (
+                      {user && bounty.status === 'open' && (
                         <Link
                           href={`/bounty/${bounty.id}/submit`}
                           className="inline-flex items-center px-3 py-1.5 border border-transparent text-xs font-medium rounded-md shadow-sm text-white bg-green-600 hover:bg-green-700 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-green-500"

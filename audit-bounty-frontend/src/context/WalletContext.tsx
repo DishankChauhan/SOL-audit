@@ -10,6 +10,7 @@ import { doc, setDoc, getDoc } from 'firebase/firestore';
 import { db } from '@/lib/firebase/config';
 import { onAuthStateChanged } from 'firebase/auth';
 import { auth } from '@/lib/firebase/config';
+import { getCluster } from '@/lib/solana/config';
 
 // Import with a workaround to avoid PostCSS processing issues with Tailwind
 require('@solana/wallet-adapter-react-ui/styles.css');
@@ -17,11 +18,23 @@ require('@solana/wallet-adapter-react-ui/styles.css');
 export const WalletContext = createContext({});
 
 export function WalletContextProvider({ children }: { children: ReactNode }) {
-  // Set Solana network to devnet for development
-  const network = WalletAdapterNetwork.Devnet;
+  // Determine the network from the RPC URL
+  const cluster = getCluster();
+  
+  // Set network based on the cluster
+  const network = useMemo(() => {
+    // WalletAdapterNetwork doesn't have localnet, default to Devnet for adapters
+    if (cluster === 'localnet') return WalletAdapterNetwork.Devnet;
+    if (cluster === 'mainnet-beta') return WalletAdapterNetwork.Mainnet;
+    if (cluster === 'testnet') return WalletAdapterNetwork.Testnet;
+    return WalletAdapterNetwork.Devnet;
+  }, [cluster]);
 
   // You can also provide a custom RPC endpoint
   const endpoint = ENV.SOLANA_RPC_URL;
+  
+  // Log to make sure we're using the right network
+  console.log(`Connecting to Solana ${cluster} at ${endpoint}`);
 
   // @solana/wallet-adapter-wallets includes all the adapters but supports tree shaking and lazy loading
   const wallets = useMemo(
