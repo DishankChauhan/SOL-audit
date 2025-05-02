@@ -12,6 +12,8 @@ import remarkBreaks from 'remark-breaks';
 import { BountyService } from '@/services/bounty';
 import { doc, updateDoc, Timestamp } from 'firebase/firestore';
 import { db } from '@/lib/firebase/config';
+import { useWallet } from '@solana/wallet-adapter-react';
+import { getConnection } from '@/lib/solana/config';
 
 import { getCurrentUserToken, getUserDebugInfo } from '@/lib/firebase/auth-utils';
 
@@ -44,17 +46,20 @@ interface IBounty {
 
 interface ISubmission {
   id: string;
-  bountyId: string;
   title: string;
   description: string;
-  severity: 'critical' | 'high' | 'medium' | 'low';
-  status: 'pending' | 'approved' | 'rejected';
+  severity: 'critical' | 'high' | 'medium' | 'low' | string;
+  status: 'pending' | 'approved' | 'rejected' | string;
   auditor: {
     id: string;
     displayName: string;
     photoURL?: string;
+    walletAddress?: string;
   };
-  createdAt: string;
+  auditorWalletAddress?: string;
+  createdAt: any;
+  transactionSignature?: string;
+  bountyId?: string;
   pocUrl?: string;
   fixUrl?: string;
 }
@@ -79,6 +84,9 @@ export default function BountyDetailPage() {
   const [activeTab, setActiveTab] = useState<'details' | 'submissions'>('details');
   const [publishing, setPublishing] = useState(false);
   const [processing, setProcessing] = useState<string | null>(null);
+  const [verifyingTransaction, setVerifyingTransaction] = useState(false);
+  const [transactionResult, setTransactionResult] = useState<any>(null);
+  const wallet = useWallet();
 
   useEffect(() => {
     // Fetch the actual bounty from Firestore
@@ -279,7 +287,7 @@ export default function BountyDetailPage() {
     isMatch: user?.uid === bounty?.owner
   });
 
-  const statusColors: StatusColorType = {
+  const statusColors: Record<string, { bg: string; text: string; label: string }> = {
     open: {
       bg: 'bg-green-100',
       text: 'text-green-800',
@@ -331,7 +339,7 @@ export default function BountyDetailPage() {
     };
   };
 
-  const severityColors = {
+  const severityColors: Record<string, { bg: string; text: string; label: string }> = {
     critical: {
       bg: 'bg-red-100',
       text: 'text-red-800',
@@ -354,7 +362,7 @@ export default function BountyDetailPage() {
     }
   };
 
-  const submissionStatusColors = {
+  const submissionStatusColors: Record<string, { bg: string; text: string; label: string }> = {
     pending: {
       bg: 'bg-yellow-100',
       text: 'text-yellow-800',
@@ -464,6 +472,103 @@ export default function BountyDetailPage() {
     }
   };
 
+  const verifyTransactions = async (bountyId: string) => {
+    try {
+      setVerifyingTransaction(true);
+      
+      // 1. Get the submissions for this bounty
+      const approvedSubmissions = submissions.filter(sub => 
+        sub.status === 'approved' && sub.transactionSignature
+      );
+      
+      if (approvedSubmissions.length === 0) {
+        return {
+          status: 'no_transactions',
+          message: 'No approved submissions with transaction signatures found'
+        };
+      }
+      
+      // 2. Verify each transaction
+      const connection = getConnection();
+      const results = [];
+      
+      for (const submission of approvedSubmissions) {
+        const signature = submission.transactionSignature;
+        if (!signature || signature === 'direct-firestore-update') continue;
+        
+        try {
+          console.log(`Verifying transaction ${signature} for submission ${submission.id}`);
+          const tx = await connection.getParsedTransaction(signature, 'confirmed');
+          
+          if (!tx) {
+            results.push({
+              submissionId: submission.id,
+              status: 'not_found',
+              signature
+            });
+            continue;
+          }
+          
+          // Get auditor wallet address
+          const auditorWallet = submission.auditorWalletAddress || 
+            (typeof submission.auditor === 'object' && submission.auditor.walletAddress);
+          
+          // Check for balance changes
+          let transferAmount = 0;
+          if (tx.meta && tx.meta.postBalances && tx.meta.preBalances && auditorWallet) {
+            tx.transaction.message.accountKeys.forEach((account, index) => {
+              if (account.pubkey.toString() === auditorWallet) {
+                const preBalance = tx.meta!.preBalances[index];
+                const postBalance = tx.meta!.postBalances[index];
+                const change = (postBalance - preBalance) / 1000000000; // Convert lamports to SOL
+                
+                if (change > 0) {
+                  transferAmount = change;
+                }
+              }
+            });
+          }
+          
+          results.push({
+            submissionId: submission.id,
+            title: submission.title || 'Untitled Submission',
+            auditor: submission.auditor?.displayName || 'Unknown Auditor',
+            status: 'verified',
+            transferAmount,
+            signature,
+            timestamp: tx.blockTime ? new Date(tx.blockTime * 1000).toISOString() : null
+          });
+        } catch (err) {
+          console.error(`Error verifying transaction ${signature}:`, err);
+          results.push({
+            submissionId: submission.id,
+            status: 'error',
+            error: err instanceof Error ? err.message : String(err),
+            signature
+          });
+        }
+      }
+      
+      return {
+        status: 'success',
+        results
+      };
+    } catch (error) {
+      console.error("Error verifying transactions:", error);
+      return {
+        status: 'error',
+        error: error instanceof Error ? error.message : String(error)
+      };
+    } finally {
+      setVerifyingTransaction(false);
+    }
+  };
+
+  const handleVerifyTransactions = async () => {
+    const result = await verifyTransactions(id as string);
+    setTransactionResult(result);
+  };
+
   if (loading) {
     return (
       <MainLayout>
@@ -516,7 +621,7 @@ export default function BountyDetailPage() {
           <div>User ID: {user?.uid || 'Not logged in'}</div>
           <div>Bounty status: {bounty?.status || 'Unknown'}</div>
           <div>isOwner check: {isOwner ? 'true (You own this bounty)' : 'false (Not your bounty)'}</div>
-          <div>Submit button should show: {(bounty?.status === 'open' || bounty?.status === 'Active') && !isOwner && user ? 'YES' : 'NO'}</div>
+          <div>Submit button should show: {(bounty?.status === 'open') && !isOwner && user ? 'YES' : 'NO'}</div>
           <div>Owner information: {bounty?.owner || 'No owner ID'}</div>
           <div>Creator wallet: {bounty?.creatorWallet || 'Not set'}</div>
           
@@ -563,13 +668,15 @@ export default function BountyDetailPage() {
             >
               Back to Bounties
             </Link>
-            {/* Always show Submit button */}
-            <Link
-              href={`/bounty/${bounty?.id}/submit`}
-              className="ml-3 inline-flex items-center px-4 py-2 border border-transparent rounded-md shadow-sm text-sm font-medium text-white bg-purple-600 hover:bg-purple-700 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-purple-500"
-            >
-              Submit Finding
-            </Link>
+            {/* Always show Submit button for authenticated users if bounty is open */}
+            {user && bounty.status === 'open' && (
+              <Link
+                href={`/bounty/${bounty?.id}/submit`}
+                className="ml-3 inline-flex items-center px-4 py-2 border border-transparent rounded-md shadow-sm text-sm font-medium text-white bg-purple-600 hover:bg-purple-700 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-purple-500"
+              >
+                Submit Finding
+              </Link>
+            )}
             {isOwner && bounty.status === 'draft' && (
               <button
                 className="ml-3 inline-flex items-center px-4 py-2 border border-transparent rounded-md shadow-sm text-sm font-medium text-white bg-green-600 hover:bg-green-700 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-green-500"
@@ -579,7 +686,7 @@ export default function BountyDetailPage() {
                 {publishing ? 'Publishing...' : 'Publish Bounty'}
               </button>
             )}
-            {(bounty.status === 'open' || bounty.status === 'Active') && !isOwner && user && (
+            {(bounty.status === 'open') && !isOwner && user && (
               <Link
                 href={`/bounty/${bounty?.id}/submit`}
                 className="ml-3 inline-flex items-center px-4 py-2 border border-transparent rounded-md shadow-sm text-sm font-medium text-white bg-indigo-600 hover:bg-indigo-700 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-indigo-500"
@@ -588,7 +695,7 @@ export default function BountyDetailPage() {
               </Link>
             )}
             {/* Submit button - always visible for all users */}
-            {user && (bounty.status === 'open' || bounty.status === 'Active') && (
+            {user && (bounty.status === 'open') && (
               <Link
                 href={`/bounty/${bounty?.id}/submit`}
                 className="ml-3 inline-flex items-center px-4 py-2 border border-transparent rounded-md shadow-sm text-sm font-medium text-white bg-purple-600 hover:bg-purple-700 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-purple-500"
@@ -647,7 +754,7 @@ export default function BountyDetailPage() {
                   </div>
                   
                   {/* Submit Finding Button for Auditors */}
-                  {user && !isOwner && (bounty.status === 'open' || bounty.status === 'Active') && (
+                  {user && !isOwner && (bounty.status === 'open') && (
                     <div className="mt-4">
                       <Link
                         href={`/bounty/${bounty?.id}/submit`}
@@ -792,7 +899,7 @@ export default function BountyDetailPage() {
                   </div>
                   
                   {/* Submit findings button - only for non-owners when bounty is open */}
-                  {user && !isOwner && (bounty.status === 'open' || bounty.status === 'Active') && (
+                  {user && !isOwner && (bounty.status === 'open') && (
                     <div className="mt-4">
                       <Link
                         href={`/bounty/${bounty?.id}/submit`}
@@ -830,7 +937,7 @@ export default function BountyDetailPage() {
                   <p className="mt-2 text-gray-500">
                     {isOwner ? 'No one has submitted any findings yet.' : 'Be the first to submit a finding!'}
                   </p>
-                  {!isOwner && user && (bounty.status === 'open' || bounty.status === 'Active') && (
+                  {!isOwner && user && (bounty.status === 'open') && (
                     <div className="mt-6">
                       <Link
                         href={`/bounty/${bounty?.id}/submit`}
@@ -840,7 +947,7 @@ export default function BountyDetailPage() {
                       </Link>
                     </div>
                   )}
-                  {!user && !isOwner && (bounty.status === 'open' || bounty.status === 'Active') && (
+                  {!user && !isOwner && (bounty.status === 'open') && (
                     <div className="mt-6 border border-indigo-100 rounded-lg p-4 bg-indigo-50">
                       <p className="mb-3 text-sm text-indigo-600">Login or create an account to submit findings for this bounty</p>
                       <Link
@@ -924,6 +1031,108 @@ export default function BountyDetailPage() {
             </div>
           )}
         </div>
+
+        {isOwner && (
+          <div className="mt-8 bg-white shadow overflow-hidden sm:rounded-lg">
+            <div className="px-4 py-5 sm:px-6">
+              <h3 className="text-lg leading-6 font-medium text-gray-900">
+                Verify Bounty Payments
+              </h3>
+              <p className="mt-1 max-w-2xl text-sm text-gray-500">
+                Check if bounty funds have been successfully transferred to auditors.
+              </p>
+            </div>
+            <div className="border-t border-gray-200 px-4 py-5 sm:px-6">
+              <button
+                type="button"
+                onClick={handleVerifyTransactions}
+                disabled={verifyingTransaction}
+                className="inline-flex items-center px-4 py-2 border border-transparent text-sm font-medium rounded-md shadow-sm text-white bg-indigo-600 hover:bg-indigo-700 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-indigo-500"
+              >
+                {verifyingTransaction ? 'Verifying...' : 'Verify Payment Transactions'}
+              </button>
+              
+              {transactionResult && (
+                <div className="mt-4">
+                  {transactionResult.status === 'no_transactions' ? (
+                    <p className="text-sm text-gray-500">{transactionResult.message}</p>
+                  ) : transactionResult.status === 'error' ? (
+                    <div className="p-4 bg-red-50 rounded-md">
+                      <p className="text-sm text-red-700">Error: {transactionResult.error}</p>
+                    </div>
+                  ) : (
+                    <div className="mt-4">
+                      <h4 className="text-sm font-medium text-gray-900 mb-2">Verification Results</h4>
+                      <div className="bg-gray-50 overflow-hidden shadow rounded-lg">
+                        <div className="overflow-x-auto">
+                          <table className="min-w-full divide-y divide-gray-200">
+                            <thead className="bg-gray-50">
+                              <tr>
+                                <th scope="col" className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">
+                                  Submission
+                                </th>
+                                <th scope="col" className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">
+                                  Auditor
+                                </th>
+                                <th scope="col" className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">
+                                  Amount
+                                </th>
+                                <th scope="col" className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">
+                                  Status
+                                </th>
+                                <th scope="col" className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">
+                                  Transaction
+                                </th>
+                              </tr>
+                            </thead>
+                            <tbody className="bg-white divide-y divide-gray-200">
+                              {transactionResult.results.map((result: any, index: number) => (
+                                <tr key={index} className={index % 2 === 0 ? 'bg-white' : 'bg-gray-50'}>
+                                  <td className="px-6 py-4 whitespace-nowrap text-sm font-medium text-gray-900">
+                                    {result.title || `Submission ${result.submissionId}`}
+                                  </td>
+                                  <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-500">
+                                    {result.auditor || 'Unknown'}
+                                  </td>
+                                  <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-500">
+                                    {result.transferAmount > 0 
+                                      ? <span className="text-green-600 font-semibold">{result.transferAmount} SOL</span>
+                                      : <span className="text-yellow-600">No transfer detected</span>
+                                    }
+                                  </td>
+                                  <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-500">
+                                    {result.status === 'verified' 
+                                      ? <span className="px-2 inline-flex text-xs leading-5 font-semibold rounded-full bg-green-100 text-green-800">Verified</span>
+                                      : result.status === 'not_found'
+                                        ? <span className="px-2 inline-flex text-xs leading-5 font-semibold rounded-full bg-yellow-100 text-yellow-800">Not Found</span>
+                                        : <span className="px-2 inline-flex text-xs leading-5 font-semibold rounded-full bg-red-100 text-red-800">Error</span>
+                                    }
+                                  </td>
+                                  <td className="px-6 py-4 whitespace-nowrap text-xs text-gray-500">
+                                    {result.signature ? (
+                                      <a 
+                                        href={`https://explorer.solana.com/tx/${result.signature}?cluster=devnet`}
+                                        target="_blank"
+                                        rel="noopener noreferrer"
+                                        className="text-indigo-600 hover:text-indigo-900"
+                                      >
+                                        {result.signature.slice(0, 8)}...{result.signature.slice(-8)}
+                                      </a>
+                                    ) : 'N/A'}
+                                  </td>
+                                </tr>
+                              ))}
+                            </tbody>
+                          </table>
+                        </div>
+                      </div>
+                    </div>
+                  )}
+                </div>
+              )}
+            </div>
+          </div>
+        )}
       </div>
     </MainLayout>
   );

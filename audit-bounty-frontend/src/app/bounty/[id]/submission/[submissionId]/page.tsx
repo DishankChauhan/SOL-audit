@@ -16,7 +16,7 @@ import { useWallet } from '@solana/wallet-adapter-react';
 import { WalletMultiButton } from '@solana/wallet-adapter-react-ui';
 import { PublicKey } from '@solana/web3.js';
 import { BountyService } from '@/services/bounty';
-import { getSolanaConnection } from '@/lib/solana/config';
+import { getConnection } from '@/lib/solana/config';
 import { Transaction } from '@solana/web3.js';
 import { ComputeBudgetProgram, TransactionInstruction } from '@solana/web3.js';
 
@@ -58,6 +58,23 @@ interface ISubmission {
 }
 
 const DEBUG = true;
+
+// Helper function to safely format dates
+function safeFormatDistanceToNow(dateValue: string | Date | number | null | undefined): string {
+  if (!dateValue) return 'some time ago';
+  
+  try {
+    const date = new Date(dateValue);
+    // Check if date is valid
+    if (isNaN(date.getTime())) {
+      return 'some time ago';
+    }
+    return formatDistanceToNow(date, { addSuffix: true });
+  } catch (error) {
+    console.warn('Error formatting date:', error);
+    return 'some time ago';
+  }
+}
 
 async function fetchUserWalletAddress(userId: string): Promise<string | null> {
   console.log('Directly fetching wallet address for user:', userId);
@@ -135,6 +152,8 @@ export default function SubmissionDetailPage() {
     message?: string;
     signature?: string;
   } | null>(null);
+  const [verificationResult, setVerificationResult] = useState<any>(null);
+  const [auditorWalletAddress, setAuditorWalletAddress] = useState<string | null>(null);
 
   useEffect(() => {
     // Fetch bounty and submission data
@@ -158,7 +177,13 @@ export default function SubmissionDetailPage() {
         }
         
         // Fetch the submission data
-        const submissionResponse = await fetch(`/api/submission/${submissionId}`);
+        console.log('Fetching submission data for ID:', submissionId);
+        const submissionUrl = `/api/submission/${submissionId}`;
+        console.log('Submission API URL:', submissionUrl);
+        
+        const submissionResponse = await fetch(submissionUrl);
+        console.log('Submission API Response Status:', submissionResponse.status);
+        
         if (!submissionResponse.ok) {
           // Handle non-200 responses
           const errorText = await submissionResponse.text();
@@ -167,6 +192,8 @@ export default function SubmissionDetailPage() {
         }
         
         const submissionData = await submissionResponse.json();
+        console.log('Submission data received:', submissionData);
+        
         if (submissionData.error) {
           throw new Error(submissionData.error);
         }
@@ -234,16 +261,47 @@ export default function SubmissionDetailPage() {
         
         // Ensure dates are properly formatted
         if (bountyData.createdAt) {
-          bountyData.createdAt = new Date(bountyData.createdAt).toISOString();
+          try {
+            const dateValue = new Date(bountyData.createdAt);
+            if (!isNaN(dateValue.getTime())) {
+              bountyData.createdAt = dateValue.toISOString();
+            }
+          } catch (err) {
+            console.warn('Invalid createdAt date format:', bountyData.createdAt);
+          }
         }
+        
         if (bountyData.deadline) {
-          bountyData.deadline = new Date(bountyData.deadline).toISOString();
+          try {
+            const dateValue = new Date(bountyData.deadline);
+            if (!isNaN(dateValue.getTime())) {
+              bountyData.deadline = dateValue.toISOString();
+            }
+          } catch (err) {
+            console.warn('Invalid deadline date format:', bountyData.deadline);
+          }
         }
+        
         if (submissionData.createdAt) {
-          submissionData.createdAt = new Date(submissionData.createdAt).toISOString();
+          try {
+            const dateValue = new Date(submissionData.createdAt);
+            if (!isNaN(dateValue.getTime())) {
+              submissionData.createdAt = dateValue.toISOString();
+            }
+          } catch (err) {
+            console.warn('Invalid submission createdAt date format:', submissionData.createdAt);
+          }
         }
+        
         if (submissionData.claimedAt) {
-          submissionData.claimedAt = new Date(submissionData.claimedAt).toISOString();
+          try {
+            const dateValue = new Date(submissionData.claimedAt);
+            if (!isNaN(dateValue.getTime())) {
+              submissionData.claimedAt = dateValue.toISOString();
+            }
+          } catch (err) {
+            console.warn('Invalid claimedAt date format:', submissionData.claimedAt);
+          }
         }
         
         setBounty(bountyData);
@@ -258,6 +316,18 @@ export default function SubmissionDetailPage() {
     
     fetchData();
   }, [id, submissionId]);
+
+  useEffect(() => {
+    if (submission) {
+      // Extract auditor wallet address from submission
+      const walletAddress = 
+        submission.auditorWalletAddress || 
+        (typeof submission.auditor === 'object' && submission.auditor?.walletAddress) ||
+        null;
+      
+      setAuditorWalletAddress(walletAddress);
+    }
+  }, [submission]);
 
   const isOwner = bounty && user && (
     // Handle both cases: owner as object with id or owner as string
@@ -324,7 +394,7 @@ export default function SubmissionDetailPage() {
     
     try {
       setProcessingAction(true);
-      console.log('Approving submission...');
+      console.log('Approving submission and releasing funds...');
       
       // First, get the hunter wallet address
       if (!submission) {
@@ -338,7 +408,7 @@ export default function SubmissionDetailPage() {
         (typeof submission.auditor === 'string' ? submission.auditor : null);
         
       if (!auditorWalletAddress) {
-        throw new Error('Hunter wallet address not found. Please ensure the auditor has connected their wallet.');
+        throw new Error('Auditor wallet address not found. Please ensure the auditor has connected their wallet.');
       }
       
       // 1. Update submission status to 'approving' first
@@ -355,14 +425,14 @@ export default function SubmissionDetailPage() {
         status: 'approving'
       } as ISubmission);
       
-      // 2. Execute on-chain approval transaction
-      console.log('Executing on-chain approval...');
+      // 2. Execute on-chain approval transaction and automatic payment
+      console.log('Executing on-chain approval and direct payment...');
       
       if (!wallet.connected || !wallet.publicKey) {
         throw new Error('Please connect your wallet first');
       }
       
-      // Use the SolanaService to release payment from escrow
+      // Use the SolanaService to release payment from escrow directly to the auditor
       const approvalResult = await SolanaService.releasePaymentFromEscrow(
         wallet,
         id as string,
@@ -385,32 +455,35 @@ export default function SubmissionDetailPage() {
         throw new Error(`On-chain approval failed: ${approvalResult.message}`);
       }
       
-      // 3. Update Firestore with successful approval
-      console.log('On-chain approval successful, updating Firestore');
+      // 3. Update Firestore with successful approval and mark as claimed
+      console.log('On-chain approval and payment successful, updating Firestore');
       
-      // Call the static method on Bounty class to approve the submission in Firebase
-      await BountyService.approveSubmission(id as string, submissionId as string);
+      // Update the submission with approval, claimed status, and transaction info
+      await updateDoc(submissionRef, {
+        status: 'approved',
+        claimed: true,
+        claimedAt: Timestamp.now(),
+        transactionSignature: approvalResult.signature,
+        approvalSignature: approvalResult.signature,
+        reviewedAt: Timestamp.now(),
+        updatedAt: Timestamp.now(),
+        reviewerComments: reviewComment || 'Approved and payment automatically sent to auditor'
+      });
       
-      // Update submission with transaction signature if available
-      if (approvalResult.signature) {
-        await updateDoc(submissionRef, {
-          transactionSignature: approvalResult.signature,
-          approvalSignature: approvalResult.signature
-        });
-      }
-      
-      console.log('Submission approved successfully, both on-chain and in Firestore');
+      console.log('Submission approved and payment sent successfully, both on-chain and in Firestore');
       
       // Update UI
       const updatedSubmission = {
         ...submission,
         status: 'approved',
+        claimed: true,
+        claimedAt: new Date().toISOString(),
         transactionSignature: approvalResult.signature
       };
       setSubmission(updatedSubmission as ISubmission);
       
       // Show success message
-      alert('Submission approved successfully! The auditor can now claim the bounty.');
+      alert('Submission approved successfully! The bounty funds have been automatically transferred to the auditor.');
       
       // Refresh the page to show the updated state
       window.location.reload();
@@ -535,6 +608,196 @@ export default function SubmissionDetailPage() {
     setShowApproveDialog(true);
   };
 
+  // Add a new function to verify transactions
+  const verifyTransaction = async (signature: string) => {
+    try {
+      setProcessingAction(true);
+      setError(null);
+
+      if (!signature) {
+        setError("No transaction signature provided");
+        return;
+      }
+
+      console.log("Verifying transaction:", signature);
+      
+      // Get the transaction details
+      const connection = getConnection();
+      const tx = await connection.getParsedTransaction(signature, 'confirmed');
+      
+      if (!tx) {
+        setError("Transaction not found on the blockchain");
+        return;
+      }
+
+      // Log transaction details for debugging
+      console.log("Transaction details:", JSON.stringify(tx, null, 2));
+
+      // Find the transfer instructions
+      let transferAmount = 0;
+      let recipientAddress = "";
+      
+      if (tx.meta && tx.meta.postBalances && tx.meta.preBalances) {
+        // Find account balance changes
+        tx.transaction.message.accountKeys.forEach((account, index) => {
+          if (account.pubkey.toString() === auditorWalletAddress) {
+            const preBalance = tx.meta!.preBalances[index];
+            const postBalance = tx.meta!.postBalances[index];
+            const change = (postBalance - preBalance) / 1000000000; // Convert lamports to SOL
+            
+            if (change > 0) {
+              transferAmount = change;
+              recipientAddress = account.pubkey.toString();
+            }
+          }
+        });
+      }
+
+      return {
+        status: 'success',
+        transferAmount,
+        recipientAddress,
+        timestamp: tx.blockTime ? new Date(tx.blockTime * 1000).toISOString() : null
+      };
+    } catch (error) {
+      console.error("Error verifying transaction:", error);
+      setError(`Error verifying transaction: ${error instanceof Error ? error.message : String(error)}`);
+      return {
+        status: 'error',
+        error: error instanceof Error ? error.message : String(error)
+      };
+    } finally {
+      setProcessingAction(false);
+    }
+  };
+
+  // Add handler for verification button
+  const handleVerifyTransaction = async () => {
+    if (!submission?.transactionSignature) {
+      setError("No transaction signature available");
+      return;
+    }
+    
+    const result = await verifyTransaction(submission.transactionSignature);
+    setVerificationResult(result);
+  };
+
+  // Update the submission API in page.tsx to ensure funds are released with approval
+  const handleVerifyBountyPayment = async () => {
+    if (!isOwner || !submission) return;
+    if (!wallet.connected || !wallet.publicKey) {
+      alert('Please connect your wallet first');
+      return;
+    }
+    
+    try {
+      setPaymentProcessing(true);
+      setError(null);
+      
+      // Get the auditor wallet address
+      const auditorWalletAddress = 
+        submission.auditorWalletAddress || 
+        (typeof submission.auditor === 'object' && submission.auditor?.walletAddress);
+        
+      if (!auditorWalletAddress) {
+        throw new Error('Auditor wallet address not found. Please ensure the auditor has connected their wallet.');
+      }
+      
+      // Use the SolanaService to release payment from escrow directly
+      const approvalResult = await SolanaService.releasePaymentFromEscrow(
+        wallet,
+        id as string,
+        auditorWalletAddress,
+        submission.payoutAmount || 0.01 // Use payout amount if available, otherwise a small default
+      );
+      
+      if (approvalResult.status === 'error') {
+        throw new Error(`Failed to release payment: ${approvalResult.message}`);
+      }
+      
+      // Update submission with transaction signature
+      const submissionRef = doc(db, 'submissions', submissionId as string);
+      await updateDoc(submissionRef, {
+        transactionSignature: approvalResult.signature,
+        approvalSignature: approvalResult.signature,
+        claimed: true,
+        claimedAt: Timestamp.now()
+      });
+      
+      setPaymentResult({
+        success: true,
+        message: 'Payment has been successfully transferred to the auditor.',
+        signature: approvalResult.signature
+      });
+      
+      // Show success message
+      alert('Payment successfully released to auditor!');
+      
+    } catch (error) {
+      console.error('Error releasing payment:', error);
+      setPaymentResult({
+        success: false,
+        message: `Error releasing payment: ${error instanceof Error ? error.message : String(error)}`
+      });
+    } finally {
+      setPaymentProcessing(false);
+    }
+  };
+
+  // Add a Manual Payment Release button component
+  const ManualPaymentReleaseButton = () => {
+    if (!isOwner || !submission || !submission.auditor) return null;
+    
+    return (
+      <div className="mt-4 bg-white shadow overflow-hidden sm:rounded-lg">
+        <div className="px-4 py-5 sm:px-6">
+          <h3 className="text-lg leading-6 font-medium text-gray-900">
+            Release Payment Manually
+          </h3>
+          <p className="mt-1 max-w-2xl text-sm text-gray-500">
+            The payment wasn't automatically transferred. Click below to manually release the funds to the auditor.
+          </p>
+        </div>
+        <div className="border-t border-gray-200 px-4 py-5 sm:px-6">
+          <button
+            type="button"
+            onClick={handleVerifyBountyPayment}
+            disabled={paymentProcessing}
+            className="inline-flex items-center px-4 py-2 border border-transparent text-sm font-medium rounded-md shadow-sm text-white bg-green-600 hover:bg-green-700 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-green-500"
+          >
+            {paymentProcessing ? (
+              <span className="flex items-center">
+                <svg className="animate-spin -ml-1 mr-2 h-4 w-4 text-white" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24">
+                  <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4"></circle>
+                  <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path>
+                </svg>
+                Processing Payment...
+              </span>
+            ) : (
+              'Release Payment to Auditor'
+            )}
+          </button>
+          
+          {paymentResult && (
+            <div className={`mt-3 p-3 rounded-md ${paymentResult.success ? 'bg-green-50 text-green-700' : 'bg-red-50 text-red-700'}`}>
+              <p>{paymentResult.message}</p>
+              {paymentResult.signature && (
+                <a 
+                  href={`https://explorer.solana.com/tx/${paymentResult.signature}?cluster=devnet`}
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  className="text-sm text-blue-600 hover:text-blue-800 underline"
+                >
+                  View transaction on Solana Explorer
+                </a>
+              )}
+            </div>
+          )}
+        </div>
+      </div>
+    );
+  };
+
   if (loading || authLoading) {
     return (
       <MainLayout>
@@ -549,23 +812,69 @@ export default function SubmissionDetailPage() {
     );
   }
 
-  if (error || !bounty || !submission) {
+  if (error) {
     return (
       <MainLayout>
-        <div className="max-w-4xl mx-auto px-4 sm:px-6 lg:px-8 py-8">
-          <div className="text-center py-12">
-            <h2 className="text-2xl font-bold text-gray-900">Error Loading Submission</h2>
-            <p className="mt-2 text-gray-600">{error || 'Submission not found'}</p>
-            <div className="mt-6">
-              <Link
-                href={`/bounty/${id}`}
-                className="inline-flex items-center px-4 py-2 border border-transparent text-sm font-medium rounded-md shadow-sm text-white bg-indigo-600 hover:bg-indigo-700 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-indigo-500"
-              >
-                Back to Bounty
-              </Link>
+        <main className="flex-1 py-6 px-4 sm:px-6 lg:px-8">
+          <div className="bg-white shadow overflow-hidden sm:rounded-lg max-w-4xl mx-auto border border-red-300">
+            <div className="px-4 py-5 sm:px-6 bg-red-50">
+              <h3 className="text-lg leading-6 font-medium text-red-800">Error Loading Submission</h3>
+              <p className="mt-1 text-sm text-red-500">{error}</p>
+            </div>
+            <div className="border-t border-gray-200 px-4 py-5 sm:p-6">
+              <div className="text-center">
+                <p className="text-sm text-gray-500 mb-4">There was a problem loading this submission. This might be because:</p>
+                <ul className="text-sm text-gray-600 list-disc list-inside mb-6">
+                  <li>The submission does not exist or has been deleted</li>
+                  <li>You don't have permission to view this submission</li>
+                  <li>There's a technical issue with retrieving the data</li>
+                </ul>
+                <div className="bg-gray-50 p-4 rounded-md text-sm text-gray-700 font-mono overflow-auto max-h-40">
+                  <p className="font-bold text-gray-900">Debug Info:</p>
+                  <p>Submission ID: {submissionId}</p>
+                  <p>Bounty ID: {id}</p>
+                  <p>Error Message: {error}</p>
+                </div>
+                <div className="mt-6">
+                  <Link
+                    href={`/bounty/${id}`}
+                    className="inline-flex items-center px-4 py-2 border border-transparent text-sm font-medium rounded-md shadow-sm text-white bg-indigo-600 hover:bg-indigo-700 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-indigo-500"
+                  >
+                    Return to Bounty
+                  </Link>
+                </div>
+              </div>
             </div>
           </div>
-        </div>
+        </main>
+      </MainLayout>
+    );
+  }
+
+  if (!bounty || !submission) {
+    return (
+      <MainLayout>
+        <main className="flex-1 py-6 px-4 sm:px-6 lg:px-8">
+          <div className="bg-white shadow overflow-hidden sm:rounded-lg max-w-4xl mx-auto border border-yellow-300">
+            <div className="px-4 py-5 sm:px-6 bg-yellow-50">
+              <h3 className="text-lg leading-6 font-medium text-yellow-800">Loading Submission</h3>
+              <p className="mt-1 text-sm text-yellow-600">Please wait while we load the data...</p>
+            </div>
+            <div className="border-t border-gray-200 px-4 py-5 sm:p-6">
+              <div className="text-center">
+                <p className="text-sm text-gray-500">If this takes too long, there might be an issue with the data retrieval.</p>
+                <div className="mt-6">
+                  <Link
+                    href={`/bounty/${id}`}
+                    className="inline-flex items-center px-4 py-2 border border-transparent text-sm font-medium rounded-md shadow-sm text-white bg-indigo-600 hover:bg-indigo-700 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-indigo-500"
+                  >
+                    Return to Bounty
+                  </Link>
+                </div>
+              </div>
+            </div>
+          </div>
+        </main>
       </MainLayout>
     );
   }
@@ -608,7 +917,7 @@ export default function SubmissionDetailPage() {
                     Submitted by {submission.auditor.displayName}
                   </h3>
                   <p className="text-sm text-gray-500">
-                    {formatDistanceToNow(new Date(submission.createdAt), { addSuffix: true })}
+                    {safeFormatDistanceToNow(submission.createdAt)}
                   </p>
                 </div>
               </div>
@@ -686,7 +995,7 @@ export default function SubmissionDetailPage() {
                   </div>
                   {submission.claimedAt && (
                     <p className="mt-1 text-sm text-gray-500">
-                      Claimed {formatDistanceToNow(new Date(submission.claimedAt), { addSuffix: true })}
+                      Claimed {safeFormatDistanceToNow(submission.claimedAt)}
                     </p>
                   )}
                 </div>
@@ -738,80 +1047,11 @@ export default function SubmissionDetailPage() {
               </div>
             )}
             
-            {isAuditor && submission.status === 'approved' && !submission.claimed && !submission.transactionSignature && (
-              <div className="mb-4">
-                <div className="flex flex-col space-y-3">
-                  {!wallet.connected ? (
-                    <div className="bg-yellow-50 border border-yellow-200 rounded-md p-3 mb-3">
-                      <p className="text-sm text-yellow-700 mb-2">You need to connect your Solana wallet to claim the bounty.</p>
-                      <div className="flex justify-start">
-                        <WalletMultiButton />
-                      </div>
-                    </div>
-                  ) : (
-                    <>
-                      <div className="bg-green-50 border border-green-200 rounded-md p-3 mb-3">
-                        <p className="text-sm text-green-700">
-                          Wallet connected: {wallet.publicKey?.toString().slice(0, 6)}...{wallet.publicKey?.toString().slice(-4)}
-                        </p>
-                      </div>
-                      <button
-                        type="button"
-                        onClick={handleClaimBountyReward}
-                        disabled={paymentProcessing}
-                        className="inline-flex items-center px-4 py-2 border border-transparent text-sm font-medium rounded-md shadow-sm text-white bg-indigo-600 hover:bg-indigo-700 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-indigo-500"
-                      >
-                        {paymentProcessing ? (
-                          <span className="flex items-center">
-                            <svg className="animate-spin -ml-1 mr-2 h-4 w-4 text-white" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24">
-                              <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4"></circle>
-                              <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path>
-                            </svg>
-                            Processing Claim...
-                          </span>
-                        ) : (
-                          'Claim Bounty Reward'
-                        )}
-                      </button>
-                    </>
-                  )}
-                  
-                  {paymentResult && (
-                    <div className={`p-3 rounded text-sm ${paymentResult.success ? 'bg-green-100 text-green-800' : 'bg-red-100 text-red-800'}`}>
-                      <p>{paymentResult.message}</p>
-                      {paymentResult.signature && (
-                        <a 
-                          href={`https://explorer.solana.com/tx/${paymentResult.signature}?cluster=devnet`}
-                          target="_blank"
-                          rel="noopener noreferrer"
-                          className="underline text-blue-600 hover:text-blue-800 mt-1 inline-block"
-                        >
-                          View transaction on Solana Explorer
-                        </a>
-                      )}
-                    </div>
-                  )}
-                </div>
-              </div>
-            )}
-            
-            {isOwner && submission.status === 'approved' && !submission.claimed && !submission.transactionSignature && (
+            {isAuditor && submission.status === 'approved' && (
               <div className="bg-green-50 border border-green-200 rounded-md p-4 mt-4">
                 <p className="text-sm text-green-700">
-                  You've approved this submission. The auditor can now claim the bounty reward.
+                  You've approved this submission. The payment has been automatically transferred to the auditor's wallet.
                 </p>
-              </div>
-            )}
-            
-            {isAuditor && submission.status === 'approved' && submission.claimed && (
-              <div>
-                <button
-                  type="button"
-                  disabled={true}
-                  className="inline-flex items-center px-4 py-2 border border-transparent text-sm font-medium rounded-md shadow-sm text-white bg-gray-400 cursor-not-allowed"
-                >
-                  Bounty Claimed
-                </button>
               </div>
             )}
             
@@ -853,12 +1093,13 @@ export default function SubmissionDetailPage() {
           onClose={() => setShowApproveDialog(false)}
           onConfirm={handleApproveSubmission}
           title="Approve Submission"
-          description={`Are you sure you want to approve this submission? This is a two-step process:
+          description={`Are you sure you want to approve this submission? This will:
 
-1. First, you will approve the submission (current step).
-2. Then, you'll see a "Pay Auditor Now" button to actually release the funds.
+1. Approve the submission for this bounty
+2. Automatically transfer the bounty funds to the auditor's wallet
+3. Mark the submission as claimed
 
-No funds will be transferred until you complete the second step.`}
+This action cannot be undone. The funds will be transferred immediately upon approval.`}
           action="approve"
           isProcessing={processingAction}
           error={error}
@@ -932,64 +1173,75 @@ No funds will be transferred until you complete the second step.`}
           </div>
         )}
 
-        {/* Add claim bounty button */}
-        {submission && submission.status === 'approved' && isAuditor && (
-          <div className="mt-6 flex flex-col space-y-4">
-            <div className="bg-green-50 border border-green-200 rounded-md p-4">
-              <div className="flex">
-                <div className="flex-shrink-0">
-                  <svg className="h-5 w-5 text-green-400" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 20 20" fill="currentColor">
-                    <path fillRule="evenodd" d="M10 18a8 8 0 100-16 8 8 0 000 16zm3.707-9.293a1 1 0 00-1.414-1.414L9 10.586 7.707 9.293a1 1 0 00-1.414 1.414l2 2a1 1 0 001.414 0l4-4z" clipRule="evenodd" />
-                  </svg>
+        {/* Verification UI section */}
+        {submission.transactionSignature && (
+          <div className="mt-6">
+            <div className="bg-white shadow sm:rounded-lg">
+              <div className="px-4 py-5 sm:p-6">
+                <h3 className="text-lg leading-6 font-medium text-gray-900">
+                  Verify Fund Transfer
+                </h3>
+                <div className="mt-2 max-w-xl text-sm text-gray-500">
+                  <p>
+                    Click below to verify if funds were successfully transferred to the auditor's wallet.
+                  </p>
+                  {auditorWalletAddress && (
+                    <p className="mt-1">
+                      Auditor's wallet: <code className="text-xs bg-gray-100 p-1 rounded">{auditorWalletAddress.slice(0, 8)}...{auditorWalletAddress.slice(-8)}</code>
+                    </p>
+                  )}
                 </div>
-                <div className="ml-3">
-                  <h3 className="text-sm font-medium text-green-800">Submission Approved</h3>
-                  <div className="mt-2 text-sm text-green-700">
-                    <p>Your submission has been approved! You can now claim your bounty reward.</p>
-                  </div>
-                  
-                  <div className="mt-4">
-                    <button
-                      type="button"
-                      onClick={handleClaimBountyReward}
-                      disabled={claimProcessing}
-                      className={`inline-flex items-center px-4 py-2 border border-transparent text-sm font-medium rounded-md shadow-sm text-white bg-green-600 hover:bg-green-700 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-green-500 ${claimProcessing ? 'opacity-50 cursor-not-allowed' : ''}`}
-                    >
-                      {claimProcessing ? 'Claiming...' : 'Claim Bounty Reward'}
-                    </button>
-                  </div>
+                <div className="mt-3">
+                  <button
+                    type="button"
+                    onClick={handleVerifyTransaction}
+                    disabled={processingAction}
+                    className="inline-flex items-center px-4 py-2 border border-transparent text-sm font-medium rounded-md shadow-sm text-white bg-indigo-600 hover:bg-indigo-700 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-indigo-500"
+                  >
+                    {processingAction ? 'Verifying...' : 'Verify Transaction'}
+                  </button>
                 </div>
+                
+                {verificationResult && (
+                  <div className="mt-4 bg-gray-50 p-4 rounded-md">
+                    <h4 className="text-sm font-medium text-gray-900">Verification Results</h4>
+                    {verificationResult.status === 'success' ? (
+                      <div className="mt-2">
+                        {verificationResult.transferAmount > 0 ? (
+                          <div>
+                            <p className="text-sm text-green-700">
+                              ✅ Confirmed: {verificationResult.transferAmount} SOL was transferred to the auditor's wallet
+                            </p>
+                            <p className="text-xs text-gray-500 mt-1">
+                              Recipient: {verificationResult.recipientAddress}
+                            </p>
+                            {verificationResult.timestamp && (
+                              <p className="text-xs text-gray-500">
+                                Time: {new Date(verificationResult.timestamp).toLocaleString()}
+                              </p>
+                            )}
+                          </div>
+                        ) : (
+                          <p className="text-sm text-yellow-700">
+                            ⚠️ No funds were transferred to the auditor's wallet in this transaction
+                          </p>
+                        )}
+                      </div>
+                    ) : (
+                      <p className="text-sm text-red-700">
+                        ❌ Error: {verificationResult.error}
+                      </p>
+                    )}
+                  </div>
+                )}
               </div>
             </div>
-            
-            {claimResult && claimResult.status === 'success' && (
-              <div className="bg-green-50 border border-green-200 rounded-md p-4">
-                <div className="flex">
-                  <div className="flex-shrink-0">
-                    <svg className="h-5 w-5 text-green-400" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 20 20" fill="currentColor">
-                      <path fillRule="evenodd" d="M10 18a8 8 0 100-16 8 8 0 000 16zm3.707-9.293a1 1 0 00-1.414-1.414L9 10.586 7.707 9.293a1 1 0 00-1.414 1.414l2 2a1 1 0 001.414 0l4-4z" clipRule="evenodd" />
-                    </svg>
-                  </div>
-                  <div className="ml-3">
-                    <h3 className="text-sm font-medium text-green-800">Bounty Claimed Successfully!</h3>
-                    <div className="mt-2 text-sm text-green-700">
-                      <p>{claimResult.message || "Your bounty reward has been claimed successfully."}</p>
-                      {claimResult.signature && (
-                        <a 
-                          href={`https://explorer.solana.com/tx/${claimResult.signature}?cluster=devnet`}
-                          target="_blank" 
-                          rel="noopener noreferrer"
-                          className="text-green-600 hover:underline mt-2 inline-block"
-                        >
-                          View transaction on Solana Explorer
-                        </a>
-                      )}
-                    </div>
-                  </div>
-                </div>
-              </div>
-            )}
           </div>
+        )}
+
+        {/* Add the payment button to the main UI where appropriate */}
+        {isOwner && submission && submission.status === 'approved' && !submission.claimed && !submission.transactionSignature && (
+          <ManualPaymentReleaseButton />
         )}
       </div>
     </MainLayout>

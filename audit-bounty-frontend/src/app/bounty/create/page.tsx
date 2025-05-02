@@ -370,7 +370,7 @@ export default function CreateBountyPage() {
               owner: user.uid,
               ownerName: user.displayName || 'Anonymous',
               ownerWallet: wallet.publicKey?.toString(),
-              status: 'active',
+              status: 'draft',
               transactionSignature: sendData.signature
             }
           })
