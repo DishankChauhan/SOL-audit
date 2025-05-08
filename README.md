@@ -28,6 +28,7 @@
 - [Future Roadmap](#future-roadmap)
 - [Contributing](#contributing)
 - [License](#license)
+- [Testing the Bounty Flow on Localnet](#testing-the-bounty-flow-on-localnet)
 
 ## 🔭 Overview
 
@@ -212,6 +213,76 @@ We welcome contributions to improve the platform! Please see the [CONTRIBUTING.m
 ## 📝 License
 
 This project is licensed under the MIT License - see the [LICENSE](LICENSE) file for details.
+
+## Testing the Bounty Flow on Localnet
+
+The project includes tools to test the complete bounty workflow on localnet. This is particularly useful for testing the escrow payment flow without connecting to devnet or mainnet.
+
+### Prerequisites
+
+1. Make sure the Solana localnet validator is running:
+   ```bash
+   solana-test-validator
+   ```
+
+2. Deploy the program to localnet if you haven't already:
+   ```bash
+   cd audit_bounty
+   solana program deploy target/deploy/audit_bounty.so
+   ```
+
+3. Update the program ID in `/src/lib/env.ts` to match your deployed program if needed.
+
+### Running the Test Flow
+
+1. Start the frontend development server:
+   ```bash
+   cd audit-bounty-frontend
+   npm run dev
+   ```
+
+2. Navigate to http://localhost:3000/debug/localnet-test-flow
+
+3. Follow the steps in the UI to:
+   - Fund test wallets
+   - Create a bounty
+   - Submit audit work
+   - Approve the submission
+   - Claim the bounty
+
+### Troubleshooting Network Issues
+
+If you encounter payment flow issues, check the following:
+
+1. **Network Mismatch**: The most common issue is mixing different networks. The Phantom wallet typically connects to devnet/mainnet which will cause transaction failures when your contract is on localnet. Use the localnet test flow for consistent network usage.
+
+2. **Bounty Status**: The bounty must be in "Approved" status before it can be claimed. The creator must approve a submission first.
+
+3. **Wallet Authorization**: The wallet claiming the bounty must be the same one that was approved by the creator.
+
+4. **Transaction Logs**: Check the browser console logs for detailed transaction errors and status updates.
+
+### Local Wallet Testing
+
+The project includes a local wallet implementation for testing without external wallets:
+
+- Test keypairs are pre-generated in `src/lib/solana/localWallet.ts`
+- The `createLocalWallet` function creates a mock wallet context that can sign transactions
+- Use `fundTestWallet` to add SOL to test wallets via localnet airdrops
+
+Example:
+```typescript
+import { createLocalWallet, fundTestWallet } from '@/lib/solana/localWallet';
+
+// Create a local wallet with creator role
+const creatorWallet = createLocalWallet('creator');
+
+// Fund it with 5 SOL
+await fundTestWallet('creator', 5);
+
+// Use it to interact with the contract
+const result = await SolanaService.initializeBounty(creatorWallet, {...});
+```
 
 ---
 

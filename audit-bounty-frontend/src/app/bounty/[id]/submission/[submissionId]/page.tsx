@@ -19,6 +19,7 @@ import { BountyService } from '@/services/bounty';
 import { getConnection } from '@/lib/solana/config';
 import { Transaction } from '@solana/web3.js';
 import { ComputeBudgetProgram, TransactionInstruction } from '@solana/web3.js';
+import { SystemProgram } from '@solana/web3.js';
 
 interface IBounty {
   id: string;
@@ -28,6 +29,7 @@ interface IBounty {
     id: string;
     displayName: string;
   };
+  amount?: number;
 }
 
 interface ISubmission {
@@ -120,6 +122,11 @@ async function fetchUserWalletAddress(userId: string): Promise<string | null> {
     console.error('Error directly fetching user wallet address:', error);
     return null;
   }
+}
+
+// Helper function to convert SOL to lamports
+function solToLamports(sol: number): number {
+  return Math.floor(sol * 1000000000);
 }
 
 export default function SubmissionDetailPage() {
@@ -394,9 +401,9 @@ export default function SubmissionDetailPage() {
     
     try {
       setProcessingAction(true);
-      console.log('Approving submission and releasing funds...');
+      console.log('Approving submission using contract flow...');
       
-      // First, get the hunter wallet address
+      // First, get the submission data
       if (!submission) {
         throw new Error('Submission data not found');
       }
@@ -411,86 +418,135 @@ export default function SubmissionDetailPage() {
         throw new Error('Auditor wallet address not found. Please ensure the auditor has connected their wallet.');
       }
       
-      // 1. Update submission status to 'approving' first
-      const submissionRef = doc(db, 'submissions', submissionId as string);
-      await updateDoc(submissionRef, {
+      // Determine the payout amount (use default if not specified)
+      const payoutAmount = submission.payoutAmount || 0.1; // Default to 0.1 SOL for testing
+      console.log(`Using payout amount: ${payoutAmount} SOL`);
+      
+      // 1. Update submission status to 'approving' first in Firebase
+      const submissionDocRef = doc(db, 'submissions', submissionId as string);
+      await updateDoc(submissionDocRef, {
         status: 'approving',
         reviewedAt: Timestamp.now(),
-        updatedAt: Timestamp.now()
+        updatedAt: Timestamp.now(),
+        payoutAmount: payoutAmount // Ensure payoutAmount is saved to the submission
       });
       
       // Set state to reflect the approving status
       setSubmission({
         ...submission,
-        status: 'approving'
+        status: 'approving',
+        payoutAmount: payoutAmount // Update local state with payout amount
       } as ISubmission);
       
-      // 2. Execute on-chain approval transaction and automatic payment
-      console.log('Executing on-chain approval and direct payment...');
+      // 2. Execute on-chain ApproveSubmission instruction to set the auditor as the approved hunter
+      console.log('Step 1: Executing ApproveSubmission instruction...');
       
       if (!wallet.connected || !wallet.publicKey) {
         throw new Error('Please connect your wallet first');
       }
       
-      // Use the SolanaService to release payment from escrow directly to the auditor
-      const approvalResult = await SolanaService.releasePaymentFromEscrow(
+      // Check if the submission has a valid ID
+      const submissionIdValue = submission.id;
+      if (!submissionIdValue) {
+        throw new Error('Submission ID not found');
+      }
+      
+      // First, approve the submission - this marks the auditor as the approved hunter
+      const approvalResult = await SolanaService.approveSubmission(
         wallet,
         id as string,
         auditorWalletAddress,
-        submission.payoutAmount || 0 // Use payout amount if available
+        submissionIdValue
       );
       
       if (approvalResult.status === 'error') {
-        console.error('On-chain approval failed:', approvalResult.message);
-        
-        // Still mark as approved in Firebase but with error note
-        await updateDoc(submissionRef, {
-          status: 'approved',
-          reviewedAt: Timestamp.now(),
-          updatedAt: Timestamp.now(),
-          reviewerComments: `Approved, but on-chain transaction had issues: ${approvalResult.message}`
-        });
-        
-        // Throw error to be caught by catch block
-        throw new Error(`On-chain approval failed: ${approvalResult.message}`);
+        throw new Error(`Failed to approve submission: ${approvalResult.message}`);
       }
       
-      // 3. Update Firestore with successful approval and mark as claimed
-      console.log('On-chain approval and payment successful, updating Firestore');
+      console.log('ApproveSubmission transaction successful:', approvalResult.txSignature);
       
-      // Update the submission with approval, claimed status, and transaction info
-      await updateDoc(submissionRef, {
+      // 3. Optionally, also execute SelectWinner to set the payout amount
+      console.log('Step 2: Executing SelectWinner instruction...');
+      
+      const submissionPda = new PublicKey(submissionIdValue); // This should be the actual submission PDA 
+      
+      const selectionResult = await SolanaService.selectWinner(
+        wallet,
+        id as string,
+        submissionIdValue,
+        submissionIdValue,
+        payoutAmount
+      );
+      
+      if (selectionResult.status === 'error') {
+        console.warn(`SelectWinner step had an issue: ${selectionResult.message}`);
+        // Continue anyway - the ApproveSubmission is the critical part
+      } else {
+        console.log('SelectWinner transaction successful:', selectionResult.txSignature);
+      }
+      
+      // 4. Update Firestore with successful approval
+      console.log('On-chain approval successful, updating Firestore');
+      
+      // Use the transaction signature from either step
+      const txSignature = selectionResult.status === 'success' 
+        ? selectionResult.txSignature 
+        : approvalResult.txSignature;
+      
+      // Update the submission with approval status and transaction info
+      await updateDoc(submissionDocRef, {
         status: 'approved',
-        claimed: true,
-        claimedAt: Timestamp.now(),
-        transactionSignature: approvalResult.signature,
-        approvalSignature: approvalResult.signature,
+        transactionSignature: txSignature,
+        approvalSignature: txSignature,
         reviewedAt: Timestamp.now(),
         updatedAt: Timestamp.now(),
-        reviewerComments: reviewComment || 'Approved and payment automatically sent to auditor'
+        payoutAmount: payoutAmount, // Ensure payoutAmount is saved to the submission
+        reviewerComments: reviewComment || 'Approved! You can now claim the bounty reward from the escrow.'
       });
       
-      console.log('Submission approved and payment sent successfully, both on-chain and in Firestore');
+      console.log('Submission approved successfully, both on-chain and in Firestore');
       
       // Update UI
       const updatedSubmission = {
         ...submission,
         status: 'approved',
-        claimed: true,
-        claimedAt: new Date().toISOString(),
-        transactionSignature: approvalResult.signature
+        transactionSignature: txSignature,
+        payoutAmount: payoutAmount, // Update local state with payout amount
+        reviewerComments: reviewComment || 'Approved! You can now claim the bounty reward from the escrow.'
       };
       setSubmission(updatedSubmission as ISubmission);
       
-      // Show success message
-      alert('Submission approved successfully! The bounty funds have been automatically transferred to the auditor.');
+      // Get auditor wallet for display purposes
+      setAuditorWalletAddress(auditorWalletAddress);
       
-      // Refresh the page to show the updated state
-      window.location.reload();
+      // Show success message explaining the escrow flow
+      alert(`Submission approved successfully! 
+
+The auditor's wallet (${auditorWalletAddress.slice(0, 6)}...${auditorWalletAddress.slice(-6)}) has been marked as the approved hunter in the blockchain.
+The auditor can now claim the bounty reward of ${payoutAmount} SOL by using the "Claim Reward" button.
+
+The funds will remain secure in the escrow until the auditor claims them.`);
       
     } catch (error) {
       console.error('Error approving submission:', error);
       setError(`Failed to approve submission: ${(error as Error).message}`);
+      
+      // Try to still mark as approved even if there was an error
+      try {
+        if (submission) {
+          const submissionDocRef = doc(db, 'submissions', submissionId as string);
+          await updateDoc(submissionDocRef, {
+            status: 'approved',
+            reviewedAt: Timestamp.now(),
+            updatedAt: Timestamp.now(),
+            reviewerComments: `${reviewComment || ''}\n\nNote: Approved, but had technical issues with the on-chain approval: ${(error as Error).message}. The auditor will need to contact you to arrange payment.`
+          });
+          
+          alert('Submission was marked as approved, but there were technical issues with the on-chain approval. The auditor will need to contact you to arrange payment.');
+        }
+      } catch (updateError) {
+        console.error('Error updating submission after failure:', updateError);
+      }
     } finally {
       setProcessingAction(false);
       setShowApproveDialog(false);
@@ -569,31 +625,77 @@ export default function SubmissionDetailPage() {
   };
 
   const handleClaimBountyReward = async () => {
-    if (!wallet || !wallet.publicKey || !bounty) {
-      alert('Wallet must be connected to claim the bounty');
+    if (!isAuditor || !submission) {
+      console.log('Cannot claim: Not the auditor of this submission');
+      return;
+    }
+    
+    if (!wallet.connected || !wallet.publicKey) {
+      alert('Please connect your wallet first');
       return;
     }
     
     try {
       setClaimProcessing(true);
-      setClaimError(null); // Clear previous errors
+      setClaimError(null);
       
-      console.log("Claiming bounty with ID:", bounty.id);
+      console.log("Claiming bounty reward for bounty:", id);
+      console.log("Current submission data:", submission);
+      console.log("Payout amount:", submission.payoutAmount || "Not specified");
+      
+      // Call the SolanaService.claimBounty method
       const result = await SolanaService.claimBounty(
         wallet,
-        bounty.id
+        id as string
       );
       
-      console.log("Claim failed:", result);
+      console.log("Claim result:", result);
       
       if (result.status === 'error') {
         setClaimError(result.message || 'Unknown error claiming bounty');
-      } else {
-        setClaimResult(result);
+        
+        // Provide more detailed error explanation
+        let errorMessage = result.message || 'Unknown error';
+        let userMessage = "Error claiming bounty: " + errorMessage;
+        
+        // Check for common errors and provide helpful messages
+        if (errorMessage.includes("BountyNotApproved")) {
+          userMessage += "\n\nThis usually means the bounty hasn't been properly marked as approved in the contract. The creator may need to approve it again.";
+        } else if (errorMessage.includes("UnauthorizedHunter")) {
+          userMessage += "\n\nThis usually means your wallet address doesn't match the one that was approved for this bounty. Make sure you're using the same wallet that submitted the work.";
+        } else if (errorMessage.includes("InstructionError")) {
+          userMessage += "\n\nThis is a contract instruction error. It might be due to incorrect PDAs, insufficient funds in the vault, or other contract-level issues.";
+        }
+        
+        alert(userMessage);
+        return;
       }
+      
+      // If we got here, the claim was successful - update Firestore
+      const submissionDocRef = doc(db, 'submissions', submissionId as string);
+      await updateDoc(submissionDocRef, {
+        claimed: true,
+        claimedAt: Timestamp.now(),
+        updatedAt: Timestamp.now()
+      });
+      
+      // Update UI
+      setSubmission({
+        ...submission,
+        claimed: true,
+        claimedAt: new Date().toISOString()
+      } as ISubmission);
+      
+      // Set the claim result for display
+      setClaimResult(result);
+      
+      // Show success message
+      alert('Congratulations! You have successfully claimed your bounty reward.');
+      
     } catch (error) {
       console.error('Error claiming bounty:', error);
       setClaimError(error instanceof Error ? error.message : String(error));
+      alert(`Error claiming bounty: ${error instanceof Error ? error.message : String(error)}`);
     } finally {
       setClaimProcessing(false);
     }
@@ -606,6 +708,15 @@ export default function SubmissionDetailPage() {
       return;
     }
     setShowApproveDialog(true);
+  };
+
+  // Simple handler for the claim button - used for the dialog
+  const handleClaimButton = () => {
+    if (!isAuditor) {
+      console.log('Cannot claim: Not auditor');
+      return;
+    }
+    setShowClaimDialog(true);
   };
 
   // Add a new function to verify transactions
@@ -690,6 +801,12 @@ export default function SubmissionDetailPage() {
       return;
     }
     
+    // Check if wallet supports signing transactions
+    if (!wallet.signTransaction) {
+      alert('Your wallet does not support transaction signing');
+      return;
+    }
+    
     try {
       setPaymentProcessing(true);
       setError(null);
@@ -703,99 +820,196 @@ export default function SubmissionDetailPage() {
         throw new Error('Auditor wallet address not found. Please ensure the auditor has connected their wallet.');
       }
       
-      // Use the SolanaService to release payment from escrow directly
-      const approvalResult = await SolanaService.releasePaymentFromEscrow(
-        wallet,
-        id as string,
-        auditorWalletAddress,
-        submission.payoutAmount || 0.01 // Use payout amount if available, otherwise a small default
+      // Create a direct transaction from creator to auditor
+      // This is a fallback method that bypasses the escrow account
+      const connection = getConnection();
+      const auditorPublicKey = new PublicKey(auditorWalletAddress);
+      const payoutAmount = submission.payoutAmount || 0.1; // Default to 0.1 SOL if not specified
+      
+      // Create a direct transfer transaction
+      const directTransferTx = new Transaction().add(
+        SystemProgram.transfer({
+          fromPubkey: wallet.publicKey,
+          toPubkey: auditorPublicKey,
+          lamports: solToLamports(payoutAmount)
+        })
       );
       
-      if (approvalResult.status === 'error') {
-        throw new Error(`Failed to release payment: ${approvalResult.message}`);
-      }
+      directTransferTx.recentBlockhash = (await connection.getRecentBlockhash()).blockhash;
+      directTransferTx.feePayer = wallet.publicKey;
       
-      // Update submission with transaction signature
+      // Sign the transaction
+      const signedTx = await wallet.signTransaction(directTransferTx);
+      
+      // Send the transaction
+      console.log(`Sending direct payment of ${payoutAmount} SOL to auditor ${auditorWalletAddress}`);
+      const transferSignature = await connection.sendRawTransaction(signedTx.serialize());
+      await connection.confirmTransaction(transferSignature, 'confirmed');
+      
+      // Update submission with the transaction signature
       const submissionRef = doc(db, 'submissions', submissionId as string);
       await updateDoc(submissionRef, {
-        transactionSignature: approvalResult.signature,
-        approvalSignature: approvalResult.signature,
+        transactionSignature: transferSignature,
+        approvalSignature: transferSignature,
         claimed: true,
-        claimedAt: Timestamp.now()
+        claimedAt: Timestamp.now(),
+        reviewerComments: (submission.reviewerComments || '') + 
+          '\n\nNote: Payment was sent directly from creator to auditor on ' + 
+          new Date().toLocaleString() + ', bypassing the escrow contract.'
       });
+      
+      // Update local state
+      setSubmission({
+        ...submission,
+        transactionSignature: transferSignature,
+        claimed: true,
+        claimedAt: new Date().toISOString()
+      } as ISubmission);
       
       setPaymentResult({
         success: true,
-        message: 'Payment has been successfully transferred to the auditor.',
-        signature: approvalResult.signature
+        message: `Payment of ${payoutAmount} SOL has been successfully transferred directly to the auditor.`,
+        signature: transferSignature
       });
       
       // Show success message
-      alert('Payment successfully released to auditor!');
+      alert('Payment successfully sent directly to the auditor!');
       
     } catch (error) {
       console.error('Error releasing payment:', error);
       setPaymentResult({
         success: false,
-        message: `Error releasing payment: ${error instanceof Error ? error.message : String(error)}`
+        message: `Error sending direct payment: ${error instanceof Error ? error.message : String(error)}`
       });
     } finally {
       setPaymentProcessing(false);
     }
   };
 
-  // Add a Manual Payment Release button component
+  // Updated Manual Payment Release button component
   const ManualPaymentReleaseButton = () => {
-    if (!isOwner || !submission || !submission.auditor) return null;
+    if (!isOwner) return null;
+    
+    // Show for approved submissions that don't have a transaction signature or have payment errors
+    const showManualPayment = submission?.status === 'approved' && 
+      (!submission.transactionSignature || 
+       submission.reviewerComments?.includes('issue with the on-chain approval') || 
+       submission.reviewerComments?.includes('technical issues'));
+    
+    if (!showManualPayment) return null;
     
     return (
-      <div className="mt-4 bg-white shadow overflow-hidden sm:rounded-lg">
-        <div className="px-4 py-5 sm:px-6">
-          <h3 className="text-lg leading-6 font-medium text-gray-900">
-            Release Payment Manually
+      <div className="mt-4 bg-white shadow overflow-hidden sm:rounded-lg border-l-4 border-yellow-400">
+        <div className="px-4 py-5 sm:px-6 bg-yellow-50">
+          <h3 className="text-lg leading-6 font-medium text-yellow-800">
+            Fallback Payment Option
           </h3>
-          <p className="mt-1 max-w-2xl text-sm text-gray-500">
-            The payment wasn't automatically transferred. Click below to manually release the funds to the auditor.
+          <p className="mt-1 max-w-2xl text-sm text-yellow-600">
+            There was an issue with the on-chain approval process. Use this option to directly transfer funds to the auditor, bypassing the escrow account.
           </p>
+          <div className="mt-3 text-sm text-gray-600">
+            <p>The normal flow is:</p>
+            <ol className="list-decimal list-inside mt-2 space-y-1">
+              <li>Approve submission (marks it as a winner in the contract)</li>
+              <li>Auditor claims payment from the escrow account</li>
+            </ol>
+            <p className="mt-2">This button provides a fallback when that process fails by sending funds directly from your wallet to the auditor.</p>
+          </div>
         </div>
-        <div className="border-t border-gray-200 px-4 py-5 sm:px-6">
+        <div className="px-4 py-3 bg-yellow-50 text-right sm:px-6 border-t border-yellow-100">
           <button
             type="button"
             onClick={handleVerifyBountyPayment}
             disabled={paymentProcessing}
-            className="inline-flex items-center px-4 py-2 border border-transparent text-sm font-medium rounded-md shadow-sm text-white bg-green-600 hover:bg-green-700 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-green-500"
+            className="inline-flex justify-center py-2 px-4 border border-transparent shadow-sm text-sm font-medium rounded-md text-white bg-yellow-600 hover:bg-yellow-700 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-yellow-500"
           >
-            {paymentProcessing ? (
-              <span className="flex items-center">
-                <svg className="animate-spin -ml-1 mr-2 h-4 w-4 text-white" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24">
-                  <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4"></circle>
-                  <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path>
-                </svg>
-                Processing Payment...
-              </span>
-            ) : (
-              'Release Payment to Auditor'
-            )}
+            {paymentProcessing ? 'Processing Payment...' : 'Send Direct Payment to Auditor'}
           </button>
-          
-          {paymentResult && (
-            <div className={`mt-3 p-3 rounded-md ${paymentResult.success ? 'bg-green-50 text-green-700' : 'bg-red-50 text-red-700'}`}>
-              <p>{paymentResult.message}</p>
-              {paymentResult.signature && (
-                <a 
-                  href={`https://explorer.solana.com/tx/${paymentResult.signature}?cluster=devnet`}
-                  target="_blank"
-                  rel="noopener noreferrer"
-                  className="text-sm text-blue-600 hover:text-blue-800 underline"
-                >
-                  View transaction on Solana Explorer
-                </a>
-              )}
-            </div>
-          )}
         </div>
+        {paymentResult && (
+          <div className={`px-4 py-3 ${paymentResult.success ? 'bg-green-50' : 'bg-red-50'}`}>
+            <p className={`text-sm ${paymentResult.success ? 'text-green-700' : 'text-red-700'}`}>
+              {paymentResult.message}
+            </p>
+            {paymentResult.signature && (
+              <p className="text-xs mt-1">
+                Transaction signature: <code>{paymentResult.signature.slice(0, 10)}...{paymentResult.signature.slice(-10)}</code>
+              </p>
+            )}
+          </div>
+        )}
       </div>
     );
+  };
+
+  // Add the ClaimReward button component for auditors
+  const ClaimRewardButton = () => {
+    if (!isAuditor) return null;
+    
+    // Only show for approved submissions that haven't been claimed yet
+    const showClaimButton = submission?.status === 'approved' && !submission.claimed;
+    
+    if (!showClaimButton) return null;
+    
+    return (
+      <div className="mt-4 bg-white shadow overflow-hidden sm:rounded-lg border-l-4 border-green-400">
+        <div className="px-4 py-5 sm:px-6 bg-green-50">
+          <h3 className="text-lg leading-6 font-medium text-green-800">
+            Claim Your Bounty Reward
+          </h3>
+          <p className="mt-1 max-w-2xl text-sm text-green-600">
+            Your submission has been approved! You can now claim your reward from the escrow account.
+          </p>
+          <div className="mt-3 text-sm text-gray-600">
+            <p>The payment process works as follows:</p>
+            <ol className="list-decimal list-inside mt-2 space-y-1">
+              <li>Your submission has been marked as a winner by the bounty creator</li>
+              <li>You can now claim the reward by clicking the button below</li>
+              <li>The funds will be transferred directly from the escrow account to your wallet</li>
+            </ol>
+          </div>
+        </div>
+        <div className="px-4 py-3 bg-green-50 text-right sm:px-6 border-t border-green-100">
+          {!wallet.connected ? (
+            <div className="flex justify-between items-center">
+              <p className="text-sm text-red-600">You need to connect your wallet to claim the reward</p>
+              <WalletMultiButton />
+            </div>
+          ) : (
+            <button
+              type="button"
+              onClick={handleClaimButton}
+              disabled={claimProcessing}
+              className="inline-flex justify-center py-2 px-4 border border-transparent shadow-sm text-sm font-medium rounded-md text-white bg-green-600 hover:bg-green-700 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-green-500"
+            >
+              {claimProcessing ? 'Processing Claim...' : 'Claim Bounty Reward'}
+            </button>
+          )}
+        </div>
+        {claimResult && (
+          <div className={`px-4 py-3 ${claimResult.status === 'success' ? 'bg-green-50' : 'bg-red-50'}`}>
+            <p className={`text-sm ${claimResult.status === 'success' ? 'text-green-700' : 'text-red-700'}`}>
+              {claimResult.message}
+            </p>
+            {claimResult.signature && (
+              <p className="text-xs mt-1">
+                Transaction signature: <code>{claimResult.signature.slice(0, 10)}...{claimResult.signature.slice(-10)}</code>
+              </p>
+            )}
+          </div>
+        )}
+      </div>
+    );
+  };
+
+  // Fix the getPayoutAmountForDisplay function
+  const getPayoutAmountForDisplay = () => {
+    if (submission?.payoutAmount) {
+      return submission.payoutAmount;
+    }
+    
+    // Default value if not specified
+    return bounty?.amount || 0;
   };
 
   if (loading || authLoading) {
@@ -829,12 +1043,6 @@ export default function SubmissionDetailPage() {
                   <li>You don't have permission to view this submission</li>
                   <li>There's a technical issue with retrieving the data</li>
                 </ul>
-                <div className="bg-gray-50 p-4 rounded-md text-sm text-gray-700 font-mono overflow-auto max-h-40">
-                  <p className="font-bold text-gray-900">Debug Info:</p>
-                  <p>Submission ID: {submissionId}</p>
-                  <p>Bounty ID: {id}</p>
-                  <p>Error Message: {error}</p>
-                </div>
                 <div className="mt-6">
                   <Link
                     href={`/bounty/${id}`}
@@ -882,6 +1090,22 @@ export default function SubmissionDetailPage() {
   return (
     <MainLayout>
       <div className="max-w-4xl mx-auto px-4 sm:px-6 lg:px-8 py-8">
+        <div className="flex flex-col md:flex-row justify-between items-start mb-6">
+          <div>
+            <h1 className="text-3xl font-bold text-gray-900">Submission Details</h1>
+            <div className="mt-2">
+              <Link href={`/bounty/${id}`} className="text-blue-600 hover:text-blue-800">
+                ← Back to Bounty
+              </Link>
+            </div>
+          </div>
+          {!wallet.connected && (
+            <div className="mt-4 md:mt-0 flex-shrink-0">
+              <WalletMultiButton />
+            </div>
+          )}
+        </div>
+
         <div className="md:flex md:items-center md:justify-between mb-6">
           <div className="flex-1 min-w-0">
             <h2 className="text-2xl font-bold leading-7 text-gray-900 sm:text-3xl sm:truncate">
@@ -1004,6 +1228,12 @@ export default function SubmissionDetailPage() {
           </div>
         </div>
 
+        {/* Add ClaimRewardButton for auditors */}
+        <ClaimRewardButton />
+
+        {/* Add ManualPaymentReleaseButton component right after the submission details */}
+        <ManualPaymentReleaseButton />
+
         {error && (
           <div className="mb-4 bg-red-50 border-l-4 border-red-400 p-4">
             <div className="flex">
@@ -1095,11 +1325,11 @@ export default function SubmissionDetailPage() {
           title="Approve Submission"
           description={`Are you sure you want to approve this submission? This will:
 
-1. Approve the submission for this bounty
-2. Automatically transfer the bounty funds to the auditor's wallet
-3. Mark the submission as claimed
+1. Mark the submission as a winner in the smart contract
+2. Enable the auditor to claim the reward from the escrow account
+3. Mark the submission as approved in the database
 
-This action cannot be undone. The funds will be transferred immediately upon approval.`}
+The funds will remain in the escrow account until the auditor claims them.`}
           action="approve"
           isProcessing={processingAction}
           error={error}
@@ -1124,11 +1354,18 @@ This action cannot be undone. The funds will be transferred immediately upon app
           isOpen={showClaimDialog}
           onClose={() => setShowClaimDialog(false)}
           onConfirm={handleClaimBountyReward}
-          title="Claim Reward"
-          description={`You're about to claim a reward of ${submission?.payoutAmount || 0} ${submission?.tokenMint ? 'USDC' : 'SOL'}. The funds will be transferred to your connected wallet.`}
+          title="Claim Bounty Reward"
+          description={`You're about to claim your reward of ${getPayoutAmountForDisplay()} SOL from the escrow account.
+
+This transaction will:
+1. Transfer funds directly from the escrow vault to your wallet
+2. Mark the bounty as claimed in the contract
+3. Record the claim in the database
+
+Your wallet must be the same one you used to submit the bounty work.`}
           action="claim"
-          isProcessing={processingAction}
-          error={error}
+          isProcessing={claimProcessing}
+          error={claimError}
         />
 
         {/* Show transaction error message */}
@@ -1237,11 +1474,6 @@ This action cannot be undone. The funds will be transferred immediately upon app
               </div>
             </div>
           </div>
-        )}
-
-        {/* Add the payment button to the main UI where appropriate */}
-        {isOwner && submission && submission.status === 'approved' && !submission.claimed && !submission.transactionSignature && (
-          <ManualPaymentReleaseButton />
         )}
       </div>
     </MainLayout>
