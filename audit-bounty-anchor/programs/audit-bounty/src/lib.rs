@@ -10,7 +10,7 @@ pub use state::*;
 pub use constants::*;
 pub use errors::*;
 
-declare_id!("Fg6PaFpoGXkYsidMpWTK6W2BeZ7FEfcYkg476zPFsLnS");
+declare_id!("BUPQa6bZdMcos6JnNmiaqwywPrBsS9iYVagH2TcBKSXi");
 
 #[derive(AnchorSerialize, AnchorDeserialize, Clone, Copy, PartialEq, Eq)]
 pub enum BountyStatus {
@@ -92,7 +92,7 @@ pub mod audit_bounty {
         let escrow = &ctx.accounts.escrow;
         
         // Set bumps for PDAs
-        let bump = bounty.bump;
+        let bump = ctx.bumps.bounty;
         let escrow_bump = ctx.bumps.escrow;
         
         // Transfer funds from creator to escrow account
@@ -152,12 +152,15 @@ pub mod audit_bounty {
         // Transfer funds from escrow to auditor
         let amount = bounty.amount;
         
-        let bounty_key = bounty.key();
+        // We need to use the PDA's bump to generate the correct seeds for signing
         let escrow_bump = ctx.bumps.escrow;
+        
+        // Get the correct escrow seeds
+        let bounty_key = bounty.key();
         let escrow_seeds = &[
             ESCROW_SEED,
             bounty_key.as_ref(),
-            &[escrow_bump],
+            &[escrow_bump]
         ];
         
         // Use invoke_signed to transfer funds from escrow PDA to auditor
@@ -168,8 +171,8 @@ pub mod audit_bounty {
                 amount,
             ),
             &[
-                escrow.clone(),
-                auditor.clone(),
+                escrow.to_account_info(),
+                auditor.to_account_info(),
                 ctx.accounts.system_program.to_account_info(),
             ],
             &[escrow_seeds],
@@ -200,12 +203,15 @@ pub mod audit_bounty {
         // Transfer funds from escrow back to creator
         let amount = bounty.amount;
         
-        let bounty_key = bounty.key();
+        // We need to use the PDA's bump to generate the correct seeds for signing
         let escrow_bump = ctx.bumps.escrow;
+        
+        // Get the correct escrow seeds
+        let bounty_key = bounty.key();
         let escrow_seeds = &[
             ESCROW_SEED,
             bounty_key.as_ref(),
-            &[escrow_bump],
+            &[escrow_bump]
         ];
         
         // Use invoke_signed to transfer funds from escrow PDA back to creator
@@ -216,7 +222,7 @@ pub mod audit_bounty {
                 amount,
             ),
             &[
-                escrow.clone(),
+                escrow.to_account_info(),
                 creator.to_account_info(),
                 ctx.accounts.system_program.to_account_info(),
             ],
@@ -255,8 +261,7 @@ pub struct CreateBounty<'info> {
             ESCROW_SEED,
             bounty.key().as_ref()
         ],
-        bump,
-        seeds::program = system_program.key()
+        bump
     )]
     /// CHECK: This is the escrow account for the bounty
     pub escrow: AccountInfo<'info>,
@@ -315,8 +320,7 @@ pub struct ApproveAndRelease<'info> {
             ESCROW_SEED,
             bounty.key().as_ref()
         ],
-        bump,
-        seeds::program = system_program.key()
+        bump
     )]
     /// CHECK: This is the escrow PDA that holds the funds
     pub escrow: AccountInfo<'info>,
@@ -370,8 +374,7 @@ pub struct CancelBounty<'info> {
             ESCROW_SEED,
             bounty.key().as_ref()
         ],
-        bump,
-        seeds::program = system_program.key()
+        bump
     )]
     /// CHECK: This is the escrow PDA that holds the funds
     pub escrow: AccountInfo<'info>,
