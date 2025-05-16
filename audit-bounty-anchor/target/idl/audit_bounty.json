@@ -1,0 +1,250 @@
+{
+  "version": "0.1.0",
+  "name": "audit_bounty",
+  "instructions": [
+    {
+      "name": "createBounty",
+      "accounts": [
+        {
+          "name": "creator",
+          "isMut": true,
+          "isSigner": true
+        },
+        {
+          "name": "bounty",
+          "isMut": true,
+          "isSigner": false
+        },
+        {
+          "name": "escrow",
+          "isMut": true,
+          "isSigner": false
+        },
+        {
+          "name": "systemProgram",
+          "isMut": false,
+          "isSigner": false
+        }
+      ],
+      "args": [
+        {
+          "name": "amount",
+          "type": "u64"
+        },
+        {
+          "name": "nonce",
+          "type": "u8"
+        }
+      ]
+    },
+    {
+      "name": "submitReport",
+      "accounts": [
+        {
+          "name": "auditor",
+          "isMut": true,
+          "isSigner": true
+        },
+        {
+          "name": "bounty",
+          "isMut": true,
+          "isSigner": false
+        }
+      ],
+      "args": [
+        {
+          "name": "reportUri",
+          "type": "string"
+        }
+      ]
+    },
+    {
+      "name": "approveAndRelease",
+      "accounts": [
+        {
+          "name": "creator",
+          "isMut": false,
+          "isSigner": true
+        },
+        {
+          "name": "bounty",
+          "isMut": true,
+          "isSigner": false
+        },
+        {
+          "name": "auditor",
+          "isMut": true,
+          "isSigner": false
+        },
+        {
+          "name": "escrow",
+          "isMut": true,
+          "isSigner": false
+        },
+        {
+          "name": "systemProgram",
+          "isMut": false,
+          "isSigner": false
+        }
+      ],
+      "args": []
+    },
+    {
+      "name": "rejectReport",
+      "accounts": [
+        {
+          "name": "creator",
+          "isMut": false,
+          "isSigner": true
+        },
+        {
+          "name": "bounty",
+          "isMut": true,
+          "isSigner": false
+        }
+      ],
+      "args": []
+    },
+    {
+      "name": "cancelBounty",
+      "accounts": [
+        {
+          "name": "creator",
+          "isMut": true,
+          "isSigner": true
+        },
+        {
+          "name": "bounty",
+          "isMut": true,
+          "isSigner": false
+        },
+        {
+          "name": "escrow",
+          "isMut": true,
+          "isSigner": false
+        },
+        {
+          "name": "systemProgram",
+          "isMut": false,
+          "isSigner": false
+        }
+      ],
+      "args": []
+    }
+  ],
+  "accounts": [
+    {
+      "name": "Bounty",
+      "type": {
+        "kind": "struct",
+        "fields": [
+          {
+            "name": "creator",
+            "type": "publicKey"
+          },
+          {
+            "name": "auditor",
+            "type": {
+              "option": "publicKey"
+            }
+          },
+          {
+            "name": "amount",
+            "type": "u64"
+          },
+          {
+            "name": "status",
+            "type": {
+              "defined": "BountyStatus"
+            }
+          },
+          {
+            "name": "reportUri",
+            "type": {
+              "option": "string"
+            }
+          },
+          {
+            "name": "createdAt",
+            "type": "i64"
+          },
+          {
+            "name": "nonce",
+            "type": "u8"
+          },
+          {
+            "name": "bump",
+            "type": "u8"
+          }
+        ]
+      }
+    }
+  ],
+  "types": [
+    {
+      "name": "BountyStatus",
+      "type": {
+        "kind": "enum",
+        "variants": [
+          {
+            "name": "Open"
+          },
+          {
+            "name": "Submitted"
+          },
+          {
+            "name": "Approved"
+          },
+          {
+            "name": "Cancelled"
+          }
+        ]
+      }
+    }
+  ],
+  "errors": [
+    {
+      "code": 6000,
+      "name": "BountyNotOpen",
+      "msg": "Bounty is not in Open status"
+    },
+    {
+      "code": 6001,
+      "name": "BountyNotInReview",
+      "msg": "Bounty is not in Submitted status"
+    },
+    {
+      "code": 6002,
+      "name": "BountyNotCompleted",
+      "msg": "Bounty is not in Approved status"
+    },
+    {
+      "code": 6003,
+      "name": "OnlyCreatorCanPerform",
+      "msg": "Only creator can perform this action"
+    },
+    {
+      "code": 6004,
+      "name": "ReportLinkTooLong",
+      "msg": "Report URI is too long"
+    },
+    {
+      "code": 6005,
+      "name": "InvalidEscrowAccount",
+      "msg": "Invalid escrow account"
+    },
+    {
+      "code": 6006,
+      "name": "AuditorAlreadyAssigned",
+      "msg": "Bounty already has an auditor assigned"
+    },
+    {
+      "code": 6007,
+      "name": "DeadlineNotReached",
+      "msg": "Auto-release deadline has not been reached yet"
+    }
+  ],
+  "metadata": {
+    "address": "BUPQa6bZdMcos6JnNmiaqwywPrBsS9iYVagH2TcBKSXi"
+  }
+}
