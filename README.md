@@ -13,7 +13,8 @@
   </div>
 </div>
 
-<br />
+<br />![Loom Screenshot 2025-05-16 at 07 53 34](https://github.com/user-attachments/assets/8aae0da3-8263-4208-a8f0-82986f8feb0a)
+
 
 ![Sol Audit Platform Interface](audit-bounty-frontend/public/Home.png)
 
